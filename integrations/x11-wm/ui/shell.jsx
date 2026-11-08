@@ -24,6 +24,8 @@ import { ThemeContext, dark, font, light, radius } from './theme.js';
 import { Window } from './Window.jsx';
 import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wasDismissed, wm } from './wm.js';
 
+const OSK_HOLD_MS = 600;
+
 // ---------------------------------------------------------------- Wallpaper
 
 function Wallpaper({ width, height, t }) {
@@ -545,14 +547,44 @@ function Shell() {
   // field in the focused app wants it (wm:textInput).
   const [autoOsk, setAutoOsk] = useState(false);
   const oskOn = settings.osk || autoOsk;
-  useHostMessage('wm:textInput', (msg) => setAutoOsk(!!msg.show));
+  // Closing, the app's room is given back in the same task (wm.osk(0)), not
+  // in the effect after the shell's render (~40 ms later on the Tab A7): the
+  // app starts its resize that much sooner.
+  const oskByUser = settings.osk;
+  useHostMessage('wm:textInput', (msg) => {
+    if (!msg.show && !oskByUser) wm.osk(0);
+    setAutoOsk(!!msg.show);
+  });
   const hideOsk = useCallback(() => {
     if (autoOsk) wm.textInputClosed();
+    wm.osk(0); // its Hide key: the setting goes off too
     setAutoOsk(false);
   }, [autoOsk]);
   // Apps make room for it (the host shrinks their work area).
   const oskHeight = oskOn && oskRect ? oskRect.height : 0;
   useEffect(() => wm.osk(oskHeight), [oskHeight]);
+  // Closing, the keyboard stays drawn (inert) until the focused app has
+  // grown into its room: the app commits its new size some time after the
+  // host tells it (Claude Desktop, an Electron app, takes a while), and
+  // meanwhile the wallpaper showed where the keyboard had been. Only for a
+  // maximized or split window (the work area resizes it), at most OSK_HOLD_MS.
+  const [oskPrev, setOskPrev] = useState(oskOn);
+  const [oskHold, setOskHold] = useState(null); // the app window's height when the keyboard closed
+  if (oskPrev !== oskOn) {
+    setOskPrev(oskOn);
+    const w = map[active];
+    setOskHold(!oskOn && w && (w.maximized || w.snap) ? { id: w.id, h: w.h } : null);
+  }
+  const heldWin = oskHold && map[oskHold.id];
+  useEffect(() => {
+    if (!oskHold) return undefined;
+    const id = setTimeout(() => setOskHold(null), OSK_HOLD_MS);
+    return () => clearTimeout(id);
+  }, [oskHold]);
+  useEffect(() => {
+    if (oskHold && (!heldWin || heldWin.h > oskHold.h)) setOskHold(null);
+  }, [oskHold, heldWin && heldWin.h]); // eslint-disable-line react-hooks/exhaustive-deps
+  const oskDrawn = oskOn || !!oskHold;
   const [notes, setNotes] = useState([]);
   const [toasts, setToasts] = useState([]);
   // Locked, a notification only counts up the lock screen's pill: no toast.
@@ -967,7 +999,11 @@ function Shell() {
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
-        {oskOn && <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />}
+        {oskDrawn && (
+          <View pointerEvents={oskOn ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
+            <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />
+          </View>
+        )}
         {locked && (
           <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>
             <Wallpaper width={scr.width} height={scr.height} t={t} />
