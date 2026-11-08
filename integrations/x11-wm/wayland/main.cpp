@@ -858,9 +858,13 @@ class WM {
   // The last GPU buffer (android_wlegl / dma-buf) each surface committed.
   // wlroots can't make a texture of these with the pixman renderer and can
   // let go of current.buffer (Firefox on the GPU: a subsurface that had an
-  // shm buffer before), so captureGpu reads them from here. No lock is held
-  // (captureGpu locks what it shows); an entry goes when its buffer is
-  // destroyed or the surface commits something else.
+  // shm buffer before), so captureGpu reads them from here. Each is locked
+  // until the surface commits another (then it goes back to the client):
+  // unlocked, wlroots released it at once, and a capture deferred past that
+  // (wm:quiet, the keyboard sliding) locked and unlocked a buffer the client
+  // already had back. That second release aborted libhybris clients
+  // (Calculator: "WaylandNativeWindow::releaseBuffer: Assertion `it !=
+  // fronted.end()' failed") whenever the keyboard came up.
   struct GpuBuf {
     wlr_buffer* buf = nullptr;
     Hook* gone = nullptr;
@@ -877,7 +881,9 @@ class WM {
       wl_list_remove(&it->second.gone->l.link);
       delete it->second.gone;
     }
+    wlr_buffer* b = it->second.buf;
     gpuBuf_.erase(it);
+    if (b) wlr_buffer_unlock(b);  // last: it may destroy the buffer
   }
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
@@ -1079,8 +1085,7 @@ bool WM::setup() {
       forgetGpuBuf(s);
       if (!gpu) return;
       GpuBuf& g = gpuBuf_[s];
-      g.buf = nb;
-      g.gone = hook(&nb->events.destroy, [this, s](void*) { forgetGpuBuf(s); });
+      g.buf = wlr_buffer_lock(nb);
     }));
 #endif
     hooks->push_back(hook(&s->events.destroy, [this, hooks, s](void*) {
