@@ -138,7 +138,7 @@ function Scrim({ color, onPress, screen }) {
   );
 }
 
-export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false, wallpaper, api }) {
+export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false, wallpaper, api, kbHeight }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
   // Kept mounted between opens (shell.jsx): start afresh, once it is gone
@@ -228,7 +228,9 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
   // same number of rows (18 apps: 6 x 3, not 7 + 7 + 4). When that many rows
   // don't fit the height (portrait), narrower columns (down to 120 px) until
   // every app shows without scrolling. The search field spans the grid.
-  const bottom = settings.osk ? 330 : screen.dock + 12;
+  // Over the keyboard's top (kbHeight: its measured height), not a guess
+  // (330 left a 67 px gap of wallpaper between the grid and the keyboard).
+  const bottom = settings.osk ? (kbHeight || 263) + 12 : screen.dock + 12;
   // The grid is laid out for the screen without the keyboard: the keyboard
   // coming up only shortens the scrolling area (it used to add columns and
   // wrap the names). (A tile ends in its second label line and padding:

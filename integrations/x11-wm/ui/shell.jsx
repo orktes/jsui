@@ -496,6 +496,30 @@ const nowText = () => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+// One shell part (a window, a panel, the keyboard) that throws while it
+// renders is left out (logged), not the whole shell: React unmounts the
+// tree below the nearest boundary, and without one that was everything (a
+// "0" rendered as text in a new window's frame took the whole UI down). It
+// tries again when its props change.
+class Guard extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error) {
+    console.error(`[shell] ${this.props.name} failed to render: ${(error && error.stack) || error}`);
+  }
+  componentDidUpdate(prev) {
+    if (this.state.failed && prev.children !== this.props.children) this.setState({ failed: false });
+  }
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
 // Below the active window when it is shorter than the screen (the keyboard
 // up, or gone and the app not grown back yet): its bottom row of pixels
 // drawn down to the screen's bottom. What a drag or the slide down uncovers before
@@ -1054,7 +1078,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {map[active] && (map[active].maximized || map[active].snap) && !overviewUp && <EdgeFill win={map[active]} screen={scr} />}
+        {map[active] && (map[active].maximized || map[active].snap) && !overviewUp && <Guard name="edge fill"><EdgeFill win={map[active]} screen={scr} /></Guard>}
         {!visible.some((w) => !w.prompt) && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={openLauncher} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
@@ -1063,6 +1087,7 @@ function Shell() {
             {/* A system prompt (the host's `prompt`: the keyring's, a polkit
                 agent's) is a centred dialog over a dimmed screen. */}
             {w.prompt && map[w.id] && !w.minimized && <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.45)' }]} />}
+            <Guard name={`window ${w.id}`}>
             <PaneClip screen={scr} pane={panes && map[w.id] && (w.id === split.left.id ? panes.left : w.id === split.right.id ? panes.right : null)}>
             <Window
               win={w}
@@ -1081,6 +1106,7 @@ function Shell() {
               splashed={launching.some((l) => l.app.id === w.appId)}
             />
             </PaneClip>
+            </Guard>
             </View>
           ),
         )}
@@ -1096,8 +1122,10 @@ function Shell() {
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
-        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall} api={launcherApi}
-          onClose={closePanel} onClosed={panelClosed} />
+        <Guard name="launcher">
+          <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall} api={launcherApi} kbHeight={oskRect ? oskRect.height : 0}
+            onClose={closePanel} onClosed={panelClosed} />
+        </Guard>
         {/* Over the launcher: the card grows out of the tapped icon as the
             launcher fades. Hidden while the launcher or the switcher is up; under
             the other panels (Quick Settings, the calendar) opened over it. */}
@@ -1129,7 +1157,7 @@ function Shell() {
             shown={dockShown}
           />
         )}
-        {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => panelEl(name, name === panel))}
+        {[closingPanel, panel].filter((n) => n && n !== 'launcher').map((name) => <Guard key={name} name={name}>{panelEl(name, name === panel)}</Guard>)}
         {/* The window menu itself is an overlay of its button (WindowMenu.jsx): taps elsewhere close it. */}
         {winMenu != null && <Pressable style={StyleSheet.absoluteFill} onPress={closeWinMenu} />}
         {dockMenu && (
@@ -1139,7 +1167,7 @@ function Shell() {
             as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
         <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'}
           style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbShown }] }}>
-          <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} />
+          <Guard name="keyboard"><Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} /></Guard>
           {/* Its top edge (and a strip above it) takes a drag down: the
               keyboard follows the finger natively, and on release goes
               (far or fast enough) or springs back. */}
