@@ -445,6 +445,19 @@ class MirHost {
     return tex_;
   }
   unsigned textureFormat() const { return es3_ ? 0x8058u : 0u; }
+  // JSUI_WL_MIR_DIRECT=1 (#260): the desktop is painted straight into the
+  // window's back buffer, turned by the runtime (JSUI_GL_ROTATE_*), and
+  // swapped on this thread: no desktop texture and no rotated copy of it
+  // (the panel's full-screen pass a frame). No present thread, no snapshots
+  // (snapshotDesktop / readDesktop have no texture), no turn animation.
+  bool direct() const { return gpu_ && direct_ && !threaded_; }
+  int panelWidth() const { return rot_ == 90 || rot_ == 270 ? h_.load() : w_.load(); }
+  int panelHeight() const { return rot_ == 90 || rot_ == 270 ? w_.load() : h_.load(); }
+  void swapDirect() {
+    const double t0 = nowMs();
+    swap();
+    lastSwapMs_ = nowMs() - t0;
+  }
   double lastBlitMs() const { return lastBlitMs_; }
   double lastSwapMs() const { return lastSwapMs_; }
   int desktopWidth() const { return w_; }
@@ -840,7 +853,7 @@ class MirHost {
     texFresh_ = true;
     glError_.clear();
     const char* th = getenv("JSUI_WL_GPU_THREAD");
-    if (!(th && th[0] == '0')) startPresentThread(cfg);
+    if (!(th && th[0] == '0') && !direct_) startPresentThread(cfg);
     return true;
   }
 
@@ -1123,6 +1136,7 @@ class MirHost {
   // JSUI_WL_GPU_FINISH: glFinish before the swap, so the blit time holds the
   // frame's GPU work and the swap time only the wait for a free buffer.
   bool finish_ = false;
+  bool direct_ = [] { const char* d = getenv("JSUI_WL_MIR_DIRECT"); return d && d[0] == '1'; }();
   static constexpr int kSnapLevels = 5;  // snapshotDesktop: the copy, then 1/2 .. 1/16
   GLuint snapTex_[kSnapLevels] = {};
   int snapW_[kSnapLevels] = {}, snapH_[kSnapLevels] = {};

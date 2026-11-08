@@ -458,6 +458,21 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   sk_sp<SkSurface> surface = g->surfaceFor(t);
   if (!surface) return -1;
   bool clear = (t.flags & JSUI_GL_NO_CLEAR) == 0;
+  // JSUI_GL_ROTATE_*: the UI is w x h, turned into the t.width x t.height
+  // target by `turn` (UI px -> target px), set on the target's canvas for
+  // the frame: a full repaint goes straight into the target turned, a
+  // damage-only one into the (UI-sized) retained frame, copied in turned.
+  const int quarter = (t.flags & JSUI_GL_ROTATE_270) == JSUI_GL_ROTATE_270 ? 3
+                      : (t.flags & JSUI_GL_ROTATE_180) ? 2
+                      : (t.flags & JSUI_GL_ROTATE_90) ? 1
+                                                         : 0;
+  const int w = quarter % 2 ? t.height : t.width, h = quarter % 2 ? t.width : t.height;
+  SkMatrix turn;
+  if (quarter == 1) turn.setAll(0, -1, float(t.width), 1, 0, 0, 0, 0, 1);
+  else if (quarter == 2) turn.setAll(-1, 0, float(t.width), 0, -1, float(t.height), 0, 0, 1);
+  else if (quarter == 3) turn.setAll(0, 1, 0, -1, 0, float(t.height), 0, 0, 1);
+  SkAutoCanvasRestore turned(surface->getCanvas(), true);
+  if (quarter) surface->getCanvas()->concat(turn);
   jsui::TextureScope textureScope(&g->textures);
   jsui::GpuLayerFrame layerFrame(g->layers.of(&rt));
   // A texture the host keeps (JSUI_GL_INCREMENTAL): it is the retained
@@ -465,7 +480,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   // is copied. Its key is the texture name, shifted into the even,
   // not-4-aligned values (never a retained surface's odd key nor a CPU frame
   // buffer's address); the first render with the flag repaints it whole.
-  if ((t.flags & JSUI_GL_INCREMENTAL) && t.texture && t.samples <= 1) {
+  if ((t.flags & JSUI_GL_INCREMENTAL) && t.texture && t.samples <= 1 && !quarter) {
     const void* texKey = reinterpret_cast<const void*>((uintptr_t(t.texture) << 2) | 2);
     for (auto& e : g->retained)  // this runtime's retained frame is not needed
       if (e.rt == &rt) e.surface.reset();
@@ -492,7 +507,7 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
   // MSAA targets and JSUI_GL_NO_RETAIN always take the direct path (the
   // retained frame is single-sampled).
   constexpr int kRetainAfter = 3, kFreeRetainedAfter = 300;
-  const SkImageInfo info = surface->imageInfo();
+  const SkImageInfo info = surface->imageInfo().makeWH(w, h);
   bool allowRetain = !(t.flags & JSUI_GL_NO_RETAIN) && t.samples <= 1;
   GLGpu::Retained* r = allowRetain ? g->retainedEntry(&rt) : nullptr;
   if (r && !GLGpu::matches(r->surface.get(), info)) r->surface.reset();
@@ -500,8 +515,8 @@ int render(Surface& rt, JsuiGpuContext* gpu, const JsuiGLTarget& t) {
                         ? reinterpret_cast<const void*>(r->key)
                         : nullptr;
   bool viaRetained = false, failed = false;
-  const int64_t frameArea = int64_t(t.width) * t.height;
-  rt.renderCanvasTracked(key, t.width, t.height, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
+  const int64_t frameArea = int64_t(w) * h;
+  rt.renderCanvasTracked(key, w, h, [&](const SkIRect&, bool keyValid) -> Surface::CanvasChoice {
     int64_t area = 0;
     for (SkRegion::Iterator it(rt.trackedDamage()); !it.done(); it.next())
       area += int64_t(it.rect().width()) * it.rect().height();

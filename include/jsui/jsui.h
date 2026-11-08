@@ -1415,7 +1415,15 @@ enum {
      * and nothing else draws into it), so only what changed is repainted,
      * straight into it, with no copy. Drop the flag for the first render
      * into a new texture. Like JSUI_GPU_INCREMENTAL. */
-    JSUI_GL_INCREMENTAL = 1 << 3
+    JSUI_GL_INCREMENTAL = 1 << 3,
+    /* The target is turned a quarter (or half) turn clockwise from the UI:
+     * width x height are the target's, the UI is laid out and painted at
+     * height x width (90 / 270) or width x height (180) and drawn turned
+     * into it, e.g. a landscape UI straight into a portrait panel's window
+     * (no rotated copy of a UI-sized texture). Not with JSUI_GL_INCREMENTAL. */
+    JSUI_GL_ROTATE_90 = 1 << 4,
+    JSUI_GL_ROTATE_180 = 1 << 5,
+    JSUI_GL_ROTATE_270 = JSUI_GL_ROTATE_90 | JSUI_GL_ROTATE_180
 };
 
 typedef struct JsuiGLTarget {

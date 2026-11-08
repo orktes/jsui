@@ -4229,6 +4229,25 @@ bool WM::renderGpu() {
 #endif
 #ifdef JSUI_WL_MIR_GL
   if (!gpu_ || !mir_->makeCurrent()) return false;
+  if (mir_->direct()) {
+    // JSUI_WL_MIR_DIRECT: into the window's back buffer, turned by the runtime.
+    JsuiGLTarget d{};
+    d.width = mir_->panelWidth();
+    d.height = mir_->panelHeight();
+    const int rot = mir_->rotation();
+    d.flags = rot == 90 ? JSUI_GL_ROTATE_90 : rot == 180 ? JSUI_GL_ROTATE_180 : rot == 270 ? JSUI_GL_ROTATE_270 : 0;
+    double t0 = nowMs();
+    if (jsui_render_gl_target(rt_, gpu_, &d) != 0) return false;
+    double t1 = nowMs();
+    lastRenderMs_ = t1 - t0;
+    if (perf_) perfPaintStats();
+    mir_->swapDirect();
+    if (perf_) {
+      gpuRenderMs_ += t1 - t0;
+      gpuSwapMs_ += mir_->lastSwapMs();
+    }
+    return true;
+  }
   bool fresh = false;
   JsuiGLTarget t{};
   t.texture = mir_->desktopTexture(&fresh);
