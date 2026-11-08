@@ -1,0 +1,54 @@
+diff -ruN '--exclude=__pycache__' pre-wsi-sw-cached/src/vulkan/wsi/wsi_common.c mesa-26.2.6/src/vulkan/wsi/wsi_common.c
+--- a/src/vulkan/wsi/wsi_common.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/vulkan/wsi/wsi_common.c	2026-11-08 00:22:15.759243010 +0000
+@@ -188,6 +188,7 @@
+ #define WSI_GET_CB(func) \
+    wsi->func = (PFN_vk##func)proc_addr(pdevice, "vk" #func)
+    WSI_GET_CB(AllocateMemory);
++   WSI_GET_CB(InvalidateMappedMemoryRanges);
+    WSI_GET_CB(AllocateCommandBuffers);
+    WSI_GET_CB(BindBufferMemory);
+    WSI_GET_CB(BindImageMemory);
+@@ -3084,6 +3085,15 @@
+ {
+    VkMemoryPropertyFlags req_props = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+ 
++   if (wsi->sw) {
++      /* Cached but not coherent beats uncached for CPU readback; the
++       * Wayland memcpy path invalidates before reading. */
++      u_foreach_bit(t, type_bits) {
++         VkMemoryPropertyFlags f = wsi->memory_props.memoryTypes[t].propertyFlags;
++         if ((f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
++            return t;
++      }
++   }
+    if (wsi->sw)
+       req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+ 
+diff -ruN '--exclude=__pycache__' pre-wsi-sw-cached/src/vulkan/wsi/wsi_common.h mesa-26.2.6/src/vulkan/wsi/wsi_common.h
+--- a/src/vulkan/wsi/wsi_common.h	2026-10-28 15:17:44.000000000 +0000
++++ b/src/vulkan/wsi/wsi_common.h	2026-11-08 00:22:15.758243010 +0000
+@@ -201,6 +201,7 @@
+ 
+ #define WSI_CB(cb) PFN_vk##cb cb
+    WSI_CB(AllocateMemory);
++   WSI_CB(InvalidateMappedMemoryRanges);
+    WSI_CB(AllocateCommandBuffers);
+    WSI_CB(BindBufferMemory);
+    WSI_CB(BindImageMemory);
+diff -ruN '--exclude=__pycache__' pre-wsi-sw-cached/src/vulkan/wsi/wsi_common_wayland.c mesa-26.2.6/src/vulkan/wsi/wsi_common_wayland.c
+--- a/src/vulkan/wsi/wsi_common_wayland.c	2026-10-28 15:17:44.000000000 +0000
++++ b/src/vulkan/wsi/wsi_common_wayland.c	2026-11-08 00:22:15.760243010 +0000
+@@ -3314,6 +3314,12 @@
+ 
+    if (chain->buffer_type == WSI_WL_BUFFER_SHM_MEMCPY) {
+       struct wsi_wl_image *image = &chain->images[image_index];
++      const VkMappedMemoryRange range = {
++         .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
++         .memory = image->base.blit.memory ? image->base.blit.memory : image->base.memory,
++         .size = VK_WHOLE_SIZE,
++      };
++      chain->base.wsi->InvalidateMappedMemoryRanges(chain->base.device, 1, &range);
+       memcpy(image->shm_ptr, image->base.cpu_map,
+              image->base.row_pitches[0] * chain->extent.height);
+    }
