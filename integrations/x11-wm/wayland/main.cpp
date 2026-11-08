@@ -673,6 +673,7 @@ class WM {
   void setSize(Client* c, int w, int h);  // screen px -> the client's units
   int oskH_ = 0;
   double quietUntil_ = 0;  // wm:quiet
+  wl_event_source* reshowTimer_ = nullptr;  // see touchEvent
   wl_event_source* quietTimer_ = nullptr;
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
@@ -1003,6 +1004,10 @@ bool WM::setup() {
   });
   display_ = wl_display_create();
   loop_ = wl_display_get_event_loop(display_);
+  reshowTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    static_cast<WM*>(u)->textInputV3_.reshow();
+    return 0;
+  }, this);
   quietTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
     auto* w = static_cast<WM*>(u);
     for (auto& [id, c] : w->clients_)
@@ -3271,6 +3276,7 @@ void WM::onMessage(const char* name, const char* json) {
     wl_event_source_timer_update(quietTimer_, int(std::min(400.0, v["ms"].num())) + 1);
   } else if (n == "wm:textInputClosed") {
     textInput_.panelClosed();
+    textInputV3_.panelClosed();
   } else if (n == "wm:release") {
     uint32_t id = uint32_t(v["id"].num());
     Client* cl = find(id);
@@ -3678,6 +3684,11 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
       wlr_seat_touch_notify_motion(seat_, timeMs, id, lx, ly);
     } else if (phase == 2) {
       wlr_seat_touch_notify_up(seat_, timeMs, id);
+      // A tap in an app whose field still has focus after the keyboard was
+      // put away: it comes back (as on a phone). Checked a moment later, so
+      // a tap that took the focus off the field (the app disables its text
+      // input) doesn't flash it.
+      if (textInputV3_.hiddenActive() && reshowTimer_) wl_event_source_timer_update(reshowTimer_, 150);
     } else if (phase == 3 && pt) {
       wlr_seat_touch_notify_cancel(seat_, pt->surface);
     }
