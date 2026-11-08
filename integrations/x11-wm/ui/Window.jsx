@@ -417,16 +417,34 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
 // (switcher cards) and a window scaled to fit its room (win.fit < 1, an app
 // keeping a size of its own) stretch it to the box.
 export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
+  const tex = win.tex;
+  const src = win.src && win.src[1] ? win.src : tex;
+  // A client-side shadow's margin (Chromium's: it keeps one even tiled) isn't drawn.
+  const gx = win.geo ? win.geo[0] / pixelRatio : 0;
+  const gy = win.geo ? win.geo[1] / pixelRatio : 0;
   if (fill || (win.fit != null && win.fit < 0.999)) {
+    // Scaled (a switcher card, a letterboxed window): the window's own part
+    // of its buffer fills the box, at the box's scale (`w` / `h` are the
+    // window as shown, its own size times `fit`). The whole buffer stretched
+    // over it showed Chromium's (Claude's) frame shrunk into a corner, beside
+    // its shadow margins and the black of the buffer's unused part.
+    if (tex && tex[0] && win.w > 0 && win.h > 0) {
+      const kx = (width * (win.fit || 1)) / win.w;
+      const ky = (height * (win.fit || 1)) / win.h;
+      return (
+        <View style={{ width, height, overflow: 'hidden' }}>
+          <HostTexture name={`win:${win.id}`} resizeMode="stretch"
+            style={{ position: 'absolute', left: -gx * kx, top: -gy * ky, width: (tex[0] / pixelRatio) * kx, height: (tex[1] / pixelRatio) * ky }} />
+        </View>
+      );
+    }
     return <HostTexture name={`win:${win.id}`} style={{ width, height }} resizeMode="stretch" />;
   }
   // Shorter than the window (it grew, its new frame not drawn yet), or
   // drawn only in part of its buffer (`src`, a viewport's source: Chromium
   // resizing leaves the rest unpainted, black): the drawn part 1:1, then its
   // bottom row carried on down to the window's bottom, not the background.
-  const tex = win.tex;
-  const src = win.src && win.src[1] ? win.src : tex;
-  const drawnH = src && src[1] ? Math.min(height, src[1] / pixelRatio) : height;
+  const drawnH = src && src[1] ? Math.min(height, src[1] / pixelRatio - gy) : height;
   const short = !!(tex && tex[1]) && drawnH < height - 0.5; // a boolean: `0 && …` rendered "0" as a text node (a new window has tex [0, 0]) and the shell threw
   const rest = height - drawnH;
   return (
@@ -438,7 +456,12 @@ export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
         </View>
       )}
       <View style={{ position: 'absolute', left: 0, top: 0, width, height: drawnH, overflow: 'hidden' }}>
-        <HostTexture name={`win:${win.id}`} scale={pixelRatio} style={{ position: 'absolute', left: 0, top: 0 }} />
+        {/* Sized: left to its own size, a buffer wider than the window
+            (Chromium keeps a 2001 x 2304 one through a turn to portrait and
+            shows 1201 x 1930 of it) was fitted to the window's width, the
+            whole buffer shrunk to 60 % with its unused part black. */}
+        <HostTexture name={`win:${win.id}`} scale={pixelRatio}
+          style={tex && tex[0] ? { position: 'absolute', left: -gx, top: -gy, width: tex[0] / pixelRatio, height: tex[1] / pixelRatio } : { position: 'absolute', left: 0, top: 0 }} />
       </View>
     </View>
   );

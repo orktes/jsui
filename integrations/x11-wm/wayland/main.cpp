@@ -588,6 +588,8 @@ struct Client {
   float crop[4] = {0, 0, 1, 1};
   int srcW = 0, srcH = 0;  // the viewport's source size in buffer px (all of it without one)
   bool frameFromSub = false;  // its GPU frame is a subsurface's (captureGpu)
+  bool gpuFrame = false;      // its texture is a client buffer, geometry margins and all (captureGpu)
+  int frameX = 0, frameY = 0;  // where that buffer's surface sits in the root surface (units)
   bool hasTexture = false;
   bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
@@ -1715,12 +1717,24 @@ void WM::onCommit(Client* c) {
   // Not beyond the surface: Chromium resizing (Claude Desktop) commits its
   // new size and contents a few frames before it sets the window geometry
   // again; the old geometry drew the new frame stretched over the old size.
+  // The whole surface tree, not the root alone: Firefox draws into a GPU
+  // subsurface over a shm root that keeps an older, smaller size, and clamped
+  // to that root it stayed short of its room (in portrait and split view
+  // most of all) whatever it was told.
   if (!c->popup && c->xdg->surface->current.width > 0 && c->xdg->surface->current.height > 0) {
-    geo.width = std::min(geo.width, c->xdg->surface->current.width - geo.x);
-    geo.height = std::min(geo.height, c->xdg->surface->current.height - geo.y);
+    wlr_box ext;
+    wlr_surface_get_extends(c->xdg->surface, &ext);
+    if (perf_ && (geo.width > ext.x + ext.width - geo.x || geo.height > ext.y + ext.height - geo.y ||
+                  geo.width > c->xdg->surface->current.width - geo.x || geo.height > c->xdg->surface->current.height - geo.y))
+      logf("geometry %u %dx%d beyond root %dx%d / tree %d,%d %dx%d at %.0f", c->id, geo.width, geo.height,
+           c->xdg->surface->current.width, c->xdg->surface->current.height, ext.x, ext.y, ext.width, ext.height, nowMs());
+    geo.width = std::min(geo.width, ext.x + ext.width - geo.x);
+    geo.height = std::min(geo.height, ext.y + ext.height - geo.y);
   }
+  const bool geoMoved = !c->popup && (geo.x != c->geoX || geo.y != c->geoY);
   c->geoX = geo.x;
   c->geoY = geo.y;
+  if (geoMoved) publishWindow(c);  // `geo` (where the shell starts drawing its frame)
   // The geometry in screen px (the client's units times cs).
   geo.width = int(std::lround(geo.width * c->cs));
   geo.height = int(std::lround(geo.height * c->cs));
@@ -1842,6 +1856,10 @@ void WM::capture(Client* c) {
     return;
   }
   if (gpuApps_ && captureGpu(c)) return;
+  if (c->gpuFrame) {
+    c->gpuFrame = false;  // a CPU composite is cropped to the geometry already
+    publishWindow(c);
+  }
   if (gpuBuffers_.count(c->id)) removeWindowTexture(c->id);  // back on shm
   wlr_surface* root = c->xdg->surface;
   int ox = c->popup ? 0 : -c->geoX, oy = c->popup ? 0 : -c->geoY;
@@ -2234,9 +2252,10 @@ bool WM::captureGpu(Client* c) {
   std::string key = "win:" + std::to_string(c->id);
   if (perfEvery_) {
     const auto& vp = pick.best->current.viewport;
-    logf("app commit %u at %.0f: buffer %dx%d, surface %dx%d, scale %d, viewport src %d %.0f,%.0f %.0fx%.0f dst %d %dx%d", c->id, nowMs(),
-         buf->width, buf->height, pick.best->current.width, pick.best->current.height, pick.best->current.scale,
-         int(vp.has_src), vp.src.x, vp.src.y, vp.src.width, vp.src.height, int(vp.has_dst), vp.dst_width, vp.dst_height);
+    logf("app commit %u at %.0f: buffer %dx%d, surface %dx%d at %d,%d (geometry at %d,%d), scale %d, viewport src %d %.0f,%.0f %.0fx%.0f dst %d %dx%d",
+         c->id, nowMs(), buf->width, buf->height, pick.best->current.width, pick.best->current.height, pick.x, pick.y, c->geoX,
+         c->geoY, pick.best->current.scale, int(vp.has_src), vp.src.x, vp.src.y, vp.src.width, vp.src.height, int(vp.has_dst),
+         vp.dst_width, vp.dst_height);
   }
   if (jsui_set_texture(rt_, key.c_str(), &t) == 0) jsui_texture_updated(rt_, key.c_str());
   wlr_buffer* held = gpuBuffers_[c->id];
@@ -2250,6 +2269,12 @@ bool WM::captureGpu(Client* c) {
   if (texResized) publishWindow(c);  // `tex` (the shell extends its bottom row under a sliding keyboard)
   c->rgba.clear();
   c->frameFromSub = pick.best != c->xdg->surface;
+  if (!c->gpuFrame || pick.x != c->frameX || pick.y != c->frameY) {
+    c->gpuFrame = true;
+    c->frameX = pick.x;
+    c->frameY = pick.y;
+    publishWindow(c);  // `geo`
+  }
   setCrop(c, pick.best, buf->width, buf->height);
   nudgeStale(c, pick.best, buf->width, buf->height);
   if (!c->hasTexture) {
@@ -2759,8 +2784,10 @@ void WM::setSnap(Client* c, int side) {
   c->maximized = false;
   c->snap = side;
   wlr_xdg_toplevel_set_maximized(c->tl, false);
-  wlr_xdg_toplevel_set_tiled(c->tl, sh_ > sw_ ? WLR_EDGE_LEFT | WLR_EDGE_RIGHT | (side == 1 ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM)
-                                                : WLR_EDGE_TOP | WLR_EDGE_BOTTOM | (side == 1 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT));
+  // Every edge: the seam's side is against the other window. With one edge
+  // left untiled Chromium (Claude Desktop) kept its shadow margins (its
+  // frame sat 15 px in from the pane's corner, black strips around it).
+  wlr_xdg_toplevel_set_tiled(c->tl, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
   Rect r = snapSlot(side);
   configure(c, r.x, r.y, r.w, r.h);
 }
@@ -2770,14 +2797,29 @@ void WM::setSnap(Client* c, int side) {
 // 1 on top, 2 below it, each under its own title bar.
 Rect WM::snapSlot(int side) const {
   Rect wa = workArea();
+  // The smallest size each side's window takes along the split (px, 0: any):
+  // the seam stops there, so both stay 1:1 and fill their panes. Claude
+  // Desktop is at least 600 units wide, 1050 px: in half of a landscape
+  // screen (991 px) it was scaled down to 0.94, blurred and letterboxed.
+  auto least = [&](int which, bool tall) {
+    for (const auto& [id, c] : clients_)
+      if (c->snap == which && c->mapped && !c->popup && c->tl)
+        return int(std::lround((tall ? c->tl->current.min_height : c->tl->current.min_width) * c->cs));
+    return 0;
+  };
   if (sh_ > sw_) {
     int tb = P(titleBar_);
     int y0 = wa.y - tb, y1 = wa.y + wa.h;
     int seam = y0 + int(std::lround((y1 - y0) * splitRatio_));
+    const int lo = wa.y + P(5) + least(1, true), hi = y1 - P(5) - tb - least(2, true);
+    if (lo <= hi) seam = std::clamp(seam, lo, hi);
     return side == 1 ? Rect{wa.x, wa.y, wa.w, seam - P(5) - wa.y} : Rect{wa.x, seam + P(5) + tb, wa.w, y1 - seam - P(5) - tb};
   }
-  int left = int(std::lround(wa.w * splitRatio_)) - P(5);
-  int right0 = int(std::lround(wa.w * splitRatio_)) + P(5);
+  int seam = int(std::lround(wa.w * splitRatio_));
+  const int lo = P(5) + least(1, false), hi = wa.w - P(5) - least(2, false);
+  if (lo <= hi) seam = std::clamp(seam, lo, hi);
+  int left = seam - P(5);
+  int right0 = seam + P(5);
   return side == 1 ? Rect{wa.x, wa.y, left, wa.h} : Rect{wa.x + right0, wa.y, wa.w - right0, wa.h};
 }
 
@@ -3264,6 +3306,7 @@ void WM::onMessage(const char* name, const char* json) {
     if (r && r->minimized) unminimize(r);
     if (l) setSnap(l, 1);
     if (r) setSnap(r, 2);
+    if (l && r) setSnap(l, 1);  // the seam may have moved for r's minimum size (snapSlot)
     if (l) raise(l);
     if (r) {
       raise(r);
@@ -3366,6 +3409,10 @@ std::string WM::windowJson(const Client* c) const {
                   ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) +
                   ",\"fit\":" + wmjson::num(c->fit) + ",\"tex\":[" + std::to_string(c->texW) + "," + std::to_string(c->texH) + "]" +
                   ",\"src\":[" + std::to_string(c->srcW) + "," + std::to_string(c->srcH) + "]" +
+                  // Where its geometry starts in its frame (px): a client-side
+                  // shadow's margin the shell skips when it draws the frame 1:1.
+                  ",\"geo\":[" + std::to_string(c->gpuFrame ? int(std::lround((c->geoX - c->frameX) * c->cs)) : 0) + "," +
+                  std::to_string(c->gpuFrame ? int(std::lround((c->geoY - c->frameY) * c->cs)) : 0) + "]" +
                   (c->crop[2] != 1 || c->crop[3] != 1 || c->crop[0] > 0 || c->crop[1] > 0
                        ? ",\"crop\":[" + wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," +
                              wmjson::num(c->crop[3]) + "]"
