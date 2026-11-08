@@ -831,9 +831,29 @@ function Shell() {
   // are gone.
   const fullPanel = panel === 'launcher' || panel === 'overview';
   const fullShown = fullPanel || closingPanel === 'launcher' || closingPanel === 'overview';
+  // openLauncher took it already, before the launcher began to fade in.
+  const snapped = useRef(false);
   useEffect(() => {
-    if (fullPanel) wm.snapshot(true);
+    if (fullPanel && !snapped.current) wm.snapshot(true);
+    snapped.current = false;
   }, [fullPanel]);
+  // The launcher's fade starts in the task of the tap (its openFirst), the
+  // shell's render of the open launcher (~35 ms on the Tab A7) in the next:
+  // a task's commands reach the runtime when it ends. The snapshot goes in
+  // the same batch as the fade's start, so it is of the screen before it.
+  const launcherApi = useRef(null);
+  const panelNow = useRef(panel);
+  panelNow.current = panel;
+  const openLauncher = useCallback(() => {
+    // From no panel only: from another full panel the snapshot is taken already.
+    if (panelNow.current == null && launcherApi.current && launcherApi.current.openFirst()) {
+      snapped.current = true;
+      wm.snapshot(true);
+      setTimeout(() => setPanel('launcher'), 0);
+    } else {
+      setPanel('launcher');
+    }
+  }, []);
   useEffect(() => {
     if (!fullShown) wm.snapshot(false);
   }, [fullShown]);
@@ -867,7 +887,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
-        {!visible.some((w) => !w.prompt) && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={() => setPanel('launcher')} />}
+        {!visible.some((w) => !w.prompt) && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={openLauncher} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
           w.type === 'dock' || w.type === 'desktop' ? null : (
@@ -898,7 +918,7 @@ function Shell() {
         )}
         {split && !overviewUp && <SplitDivider left={split.left} right={split.right} screen={scr} t={t} bottom={bottom} />}
         <SnapPreview preview={preview} screen={scr} t={t} bottom={bottom} />
-        {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('launcher')} />}
+        {edges && <EdgeSwipe side="left" top={scr.topBar} bottom={bottom} onSwipe={openLauncher} />}
         {edges && <EdgeSwipe side="right" top={scr.topBar} bottom={bottom} onSwipe={() => setPanel('overview')} />}
         {!fullscreen && (
           <TopBar screen={scr} solid={solidBar} panel={panel} setPanel={setPanel} settings={settings} system={system}
@@ -908,7 +928,7 @@ function Shell() {
         {/* The launcher stays mounted (hidden while closed): opening it then
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
-        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall}
+        <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall} api={launcherApi}
           onClose={closePanel} onClosed={panelClosed} />
         {/* Over the launcher: the card grows out of the tapped icon as the
             launcher fades. Hidden while the launcher or the switcher is up; under

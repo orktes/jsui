@@ -21,41 +21,55 @@ function useEntrance(open = true, duration = 220, onClosed) {
   const v = useRef(new Animated.Value(0)).current;
   const done = useRef(onClosed);
   done.current = onClosed;
-  const early = useRef(false);  // closing already (closeFirst)
+  const early = useRef(null);  // 'open' | 'close': started already (openFirst / closeFirst)
+  const show = useCallback(() => {
+    Animated.timing(v, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, [v, duration]);
   const close = useCallback(() => {
     Animated.timing(v, { toValue: 0, duration: 170, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => done.current && done.current());
   }, [v]);
   useEffect(() => {
-    if (open) {
-      early.current = false;
-      Animated.timing(v, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-    } else if (early.current) {
-      early.current = false;
-    } else {
-      close();
-    }
-  }, [open, v, duration, close]);
+    const started = early.current === (open ? 'open' : 'close');
+    early.current = null;
+    if (started) return;
+    if (open) show();
+    else close();
+  }, [open, show, close]);
   // Dismissing (a tap beside the content): the fade out starts in the task
   // of the tap, and `dismiss` (the state change) runs in a task of its own.
   // React runs on a thread of its own and a task's commands reach the
   // runtime when it ends: the shell's render for a closed panel took ~40 ms
   // on the Tab A7, the first frame of the fade came that much after the tap.
   const closeFirst = useCallback((dismiss) => {
-    early.current = true;
+    early.current = 'close';
     close();
     setTimeout(dismiss, 0);
   }, [close]);
-  return [v, closeFirst];
+  // The same for opening a panel that stays mounted (the launcher): the
+  // caller changes the state in a task after this one.
+  const openFirst = useCallback(() => {
+    early.current = 'open';
+    show();
+  }, [show]);
+  return [v, closeFirst, openFirst];
 }
 
 // A spring 0 -> 1 for things that should land with a little life.
+// `springNow()` starts it ahead of `open` (useEntrance's openFirst).
 function useSpringIn(open = true) {
   const v = useRef(new Animated.Value(0)).current;
+  const early = useRef(false);
+  const spring = useCallback(() => Animated.spring(v, { toValue: 1, tension: 180, friction: 22, useNativeDriver: true }).start(), [v]);
   useEffect(() => {
-    if (open) Animated.spring(v, { toValue: 1, tension: 180, friction: 22, useNativeDriver: true }).start();
+    if (open && early.current) early.current = false;
+    else if (open) spring();
     else Animated.timing(v, { toValue: 0, duration: 170, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start();
-  }, [open, v]);
-  return v;
+  }, [open, v, spring]);
+  const springNow = useCallback(() => {
+    early.current = true;
+    spring();
+  }, [spring]);
+  return [v, springNow];
 }
 
 // ---------------------------------------------------------------- Launcher
@@ -123,7 +137,7 @@ function Scrim({ color, onPress, screen }) {
   );
 }
 
-export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false, wallpaper }) {
+export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed, onLaunch, settings, open = true, warm = false, wallpaper, api }) {
   const t = useTheme();
   const [query, setQuery] = useState('');
   // Kept mounted between opens (shell.jsx): start afresh, once it is gone
@@ -132,9 +146,25 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     setQuery('');
     onClosed && onClosed();
   }, [onClosed]);
-  const [v, closeFirst] = useEntrance(open, 200, closed);
+  const [v, closeFirst, openFirst] = useEntrance(open, 200, closed);
   const dismiss = useCallback(() => closeFirst(onClose), [closeFirst, onClose]);
-  const pop = useSpringIn(open);
+  const [pop, springNow] = useSpringIn(open);
+  // `api.current.openFirst()` (shell.jsx openLauncher): the fade and the
+  // spring start in the task of the tap; false when it is open already.
+  const isOpen = useRef(open);
+  isOpen.current = open;
+  useEffect(() => {
+    if (!api) return undefined;
+    api.current = {
+      openFirst: () => {
+        if (isOpen.current) return false;
+        openFirst();
+        springNow();
+        return true;
+      },
+    };
+    return () => { api.current = null; };
+  }, [api, openFirst, springNow]);
   // Painted once at idle after start (shell.jsx `warm`), at an opacity that
   // changes no pixel and with touches passing through: the first open then
   // finds the icons uploaded, the glyphs rasterized and the grid's layer
