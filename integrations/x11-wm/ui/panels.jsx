@@ -21,14 +21,31 @@ function useEntrance(open = true, duration = 220, onClosed) {
   const v = useRef(new Animated.Value(0)).current;
   const done = useRef(onClosed);
   done.current = onClosed;
+  const early = useRef(false);  // closing already (closeFirst)
+  const close = useCallback(() => {
+    Animated.timing(v, { toValue: 0, duration: 170, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => done.current && done.current());
+  }, [v]);
   useEffect(() => {
     if (open) {
+      early.current = false;
       Animated.timing(v, { toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+    } else if (early.current) {
+      early.current = false;
     } else {
-      Animated.timing(v, { toValue: 0, duration: 170, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => done.current && done.current());
+      close();
     }
-  }, [open, v, duration]);
-  return v;
+  }, [open, v, duration, close]);
+  // Dismissing (a tap beside the content): the fade out starts in the task
+  // of the tap, and `dismiss` (the state change) runs in a task of its own.
+  // React runs on a thread of its own and a task's commands reach the
+  // runtime when it ends: the shell's render for a closed panel took ~40 ms
+  // on the Tab A7, the first frame of the fade came that much after the tap.
+  const closeFirst = useCallback((dismiss) => {
+    early.current = true;
+    close();
+    setTimeout(dismiss, 0);
+  }, [close]);
+  return [v, closeFirst];
 }
 
 // A spring 0 -> 1 for things that should land with a little life.
@@ -115,7 +132,8 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
     setQuery('');
     onClosed && onClosed();
   }, [onClosed]);
-  const v = useEntrance(open, 200, closed);
+  const [v, closeFirst] = useEntrance(open, 200, closed);
+  const dismiss = useCallback(() => closeFirst(onClose), [closeFirst, onClose]);
   const pop = useSpringIn(open);
   // Painted once at idle after start (shell.jsx `warm`), at an opacity that
   // changes no pixel and with touches passing through: the first open then
@@ -199,7 +217,7 @@ export const Launcher = memo(function Launcher({ screen, apps, onClose, onClosed
           at every open, and inside the grid's layer it made that layer
           stale every time (the whole grid painted again). */}
       <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[StyleSheet.absoluteFill, { opacity: v }]}>
-        <WallScrim wallpaper={wallpaper} onPress={onClose} screen={screen} />
+        <WallScrim wallpaper={wallpaper} onPress={dismiss} screen={screen} />
       </Animated.View>
       {/* The search field and the grid fade as layers of their own: the
           field's caret and focus change at every open, and inside the grid's
@@ -379,7 +397,8 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
   // Which window the switcher grows back into when it closes: the current
   // one, or the card that was tapped.
   const [target, setTarget] = useState(active);
-  const enter = useEntrance(open, 300, onClosed);
+  const [enter, closeFirst] = useEntrance(open, 300, onClosed);
+  const dismiss = useCallback(() => closeFirst(onClose), [closeFirst, onClose]);
   const scrollX = useRef(0);
   // Most recent first: the stack's top is the window used last.
   const wins = useMemo(
@@ -442,7 +461,7 @@ export const Overview = memo(function Overview({ screen, windows, launches = [],
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
         {/* The cards over home's wallpaper, dimmed: a blurred copy of the
             app they came from read as a flat grey behind them. */}
-        <WallScrim wallpaper={wallpaper} onPress={onClose} screen={screen} />
+        <WallScrim wallpaper={wallpaper} onPress={dismiss} screen={screen} />
       </Animated.View>
       <Animated.View pointerEvents="box-none" style={[styles.overviewHead, { top: screen.topBar + 22, opacity: enter }]}>
         {/* No title over the cards (they say what this is); just the way out. */}
@@ -664,7 +683,7 @@ function QsAction({ icon, label, on, onPress, anchor }) {
 
 export const QuickSettings = memo(function QuickSettings({ screen, settings, system, windows, onClose, onClosed, onLock, onReload, open = true }) {
   const t = useTheme();
-  const v = useEntrance(open, 200, onClosed);
+  const [v] = useEntrance(open, 200, onClosed);
   const [power, setPower] = useState(false);
   const [wifiOpen, setWifiOpen] = useState(false);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
@@ -808,7 +827,7 @@ function groupNotes(list) {
 export const CalendarPanel = memo(function CalendarPanel({ screen, notifications, onClear, onDismiss, onOpen, onClose, onClosed, open = true }) {
   const t = useTheme();
   const now = useClock();
-  const v = useEntrance(open, 200, onClosed);
+  const [v] = useEntrance(open, 200, onClosed);
   const ty = v.interpolate({ inputRange: [0, 1], outputRange: [-24, 0] });
   const cells = monthGrid(now);
   const narrow = screen.width < 760;
@@ -915,7 +934,7 @@ export const LockScreen = memo(function LockScreen({ screen, onUnlock, notificat
     () => Animated.add(finger.dy.interpolate({ inputRange: [-1, 0], outputRange: [-1, 0], extrapolateLeft: 'extend', extrapolateRight: 'clamp' }), drag),
     [finger, drag],
   );
-  const v = useEntrance(true, 260);
+  const [v] = useEntrance(true, 260);
   const anchor = useAnchor('lock.handle');
   const pan = useMemo(
     () =>
@@ -983,7 +1002,7 @@ export const Toasts = memo(function Toasts({ screen, toasts, onDone, onOpen }) {
 // Shown for a few seconds, then slides back up; a tap puts it away sooner.
 function Toast({ n, t, onDone, onOpen }) {
   const [open, setOpen] = useState(true);
-  const v = useEntrance(open, 240, () => onDone(n.id));
+  const [v] = useEntrance(open, 240, () => onDone(n.id));
   useEffect(() => {
     playNotify();
     const id = setTimeout(() => setOpen(false), 3200);
