@@ -1668,6 +1668,15 @@ void WM::fitMaximized(Client* c) {
     c->y = wa.y + wa.h - c->h;
     return;
   }
+  // Within a pixel or two of its room (646 units at cs 1.75 are 1131 px in a
+  // 1130 px area): shown 1:1 at its top-left, the pixel cut. Scaled by
+  // 0.999 it was resampled, and its JSON flipped against the configure's
+  // (x 0.57 / w 1141.85 and back), each flip a render of the shell.
+  if (c->w <= wa.w + 2 && c->h <= wa.h + 2) {
+    c->x = wa.x;
+    c->y = wa.y;
+    return;
+  }
   c->fit = std::min({1.0, double(wa.w) / c->w, double(wa.h) / c->h});
   c->x = wa.x + std::max(0, int(std::lround((wa.w - c->w * c->fit) / 2)));
   c->y = wa.y + std::max(0, int(std::lround((wa.h - c->h * c->fit) / 2)));
