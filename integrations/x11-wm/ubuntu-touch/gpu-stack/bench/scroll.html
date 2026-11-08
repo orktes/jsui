@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>scroll bench</title>
+<style>body{font:18px/1.5 sans-serif;margin:0 40px}.card{margin:16px 0;padding:16px;border-radius:12px;box-shadow:0 2px 8px #0003;background:linear-gradient(135deg,#fdfbfb,#ebedee)}img{width:100%;height:120px;background:linear-gradient(90deg,#f6d365,#fda085)}</style>
+<div id="c"></div>
+<script>
+// Auto-scroll a long page and log rAF fps + frame-time percentiles to the console (stdout).
+const c = document.getElementById('c');
+for (let i = 0; i < 400; i++) c.insertAdjacentHTML('beforeend', `<div class="card"><h3>Card ${i}</h3><div class="img" style="height:80px;background:linear-gradient(90deg,hsl(${i*7%360},70%,70%),hsl(${i*13%360},70%,60%))"></div><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat ${i}.</p></div>`);
+let last = 0, frames = [], dir = 1, t0 = 0, secs = 0;
+function tick(t) {
+  if (!t0) t0 = t;
+  if (last) frames.push(t - last);
+  last = t;
+  window.scrollBy(0, 12 * dir);
+  if (window.scrollY + innerHeight >= document.body.scrollHeight - 2 || window.scrollY <= 0 && dir < 0) dir = -dir;
+  if (t - t0 >= 1000) {
+    const s = frames.slice().sort((a, b) => a - b), p = q => s[Math.min(s.length - 1, Math.floor(q * s.length))].toFixed(1);
+    console.log(`BENCH fps=${frames.length} p50=${p(.5)} p95=${p(.95)} max=${s[s.length - 1].toFixed(1)}`);
+    frames = []; t0 = t; secs++;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>

@@ -1,0 +1,7 @@
+#!/bin/sh
+# with-lock CMD...: wait for ~/caps/deploy.lock (the shell thread's deploy lock) to be free,
+# take it atomically, run CMD, release it (only if it is still ours).
+L=$HOME/caps/deploy.lock; mkdir -p "$HOME/caps"
+until (set -C; echo "gpu-stack (Turnip/Zink thread) $(date -u +%FT%TZ)" > "$L") 2>/dev/null; do sleep 5; done
+trap 'grep -q "^gpu-stack" "$L" 2>/dev/null && rm -f "$L"' EXIT INT TERM
+"$@"
