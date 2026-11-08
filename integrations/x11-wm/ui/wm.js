@@ -126,7 +126,10 @@ export const DEFAULT_SETTINGS = {
 
 export function useSettings() {
   const s = useHostState('wm.settings', DEFAULT_SETTINGS);
-  return { ...DEFAULT_SETTINGS, ...s };
+  // One object per change of the state: a new one per render made every
+  // memoized panel that takes `settings` (the launcher, ~10 ms of its grid on
+  // the Tab A7) render again with each render of the shell.
+  return useMemo(() => ({ ...DEFAULT_SETTINGS, ...s }), [s]);
 }
 
 export function setSetting(key, value) {
