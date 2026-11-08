@@ -32,6 +32,7 @@ const OSK_HOLD_MS = 600;
 // rendered it again, 12-19 ms each, also while partly off the screen).
 const OSK_OFF = 320; // layout px (~560 screen px; the keyboard is ~263)
 const OSK_REST = OSK_OFF - 2;
+const KB_GRAB = 24; // the keyboard's grab strip reaches this far above its top edge
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -602,6 +603,42 @@ function Shell() {
   const hideOskRef = useRef(hideOsk);
   hideOskRef.current = hideOsk;
   const hideOskStable = useCallback(() => hideOskRef.current(), []);
+  // Drag down to dismiss (the grab strip on its top edge): kbShown is the
+  // slide plus the finger's travel down, both native.
+  const kbDrag = useNativeDragY();
+  const kbShown = useMemo(
+    () => Animated.add(kbY, kbDrag.dy.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolateLeft: 'clamp' })),
+    [kbY, kbDrag],
+  );
+  const kbPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: () => kbDrag.on.setValue(1),
+        onPanResponderRelease: (e, g) => {
+          const d = Math.max(0, g.dy);
+          // The finger's offset folded into the slide's value, same frame.
+          kbY.setValue(d);
+          kbDrag.on.setValue(0);
+          if (d > 70 || (d > 10 && g.vy > 0.5)) {
+            if (settingsOskRef.current) setSetting('osk', false);
+            hideOskRef.current(); // holds there until the app has grown, then slides on down
+          } else {
+            Animated.spring(kbY, { toValue: 0, tension: 180, friction: 22, useNativeDriver: true }).start();
+          }
+        },
+        onPanResponderTerminate: () => {
+          kbDrag.on.setValue(0);
+          Animated.spring(kbY, { toValue: 0, tension: 180, friction: 22, useNativeDriver: true }).start();
+        },
+      }),
+    [kbY, kbDrag],
+  );
+  const settingsOskRef = useRef(settings.osk);
+  settingsOskRef.current = settings.osk;
+  const kbH = oskRect ? oskRect.height : 263;
   // In screen coordinates (its box is the bottom OSK_OFF px of the screen).
   const scrH = useRef(0);
   scrH.current = dims.height;
@@ -817,7 +854,7 @@ function Shell() {
       const cx = seamOf(split, scr);
       r.push(stacked(split) ? [0, cx - 16, W, 32] : [cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
-    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y - KB_GRAB, oskRect.width, oskRect.height + KB_GRAB]); // and its grab strip
     // Toasts take a tap (it puts them away), not the app under them.
     if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
@@ -1071,8 +1108,15 @@ function Shell() {
         {/* Mounted from the start, below the screen while closed: mounting it
             as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
         <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'}
-          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbY }] }}>
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbShown }] }}>
           <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} />
+          {/* Its top edge (and a strip above it) takes a drag down: the
+              keyboard follows the finger natively, and on release goes
+              (far or fast enough) or springs back. */}
+          <View {...kbPan.panHandlers} {...kbDrag.handlers}
+            style={{ position: 'absolute', left: 0, right: 0, top: OSK_OFF - kbH - KB_GRAB, height: KB_GRAB + 14, alignItems: 'center' }}>
+            <View pointerEvents="none" style={{ marginTop: KB_GRAB + 4, width: 40, height: 5, borderRadius: 3, backgroundColor: t.textMute, opacity: 0.6 }} />
+          </View>
         </Animated.View>
         {locked && (
           <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>

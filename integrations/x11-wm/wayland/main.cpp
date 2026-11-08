@@ -3208,6 +3208,7 @@ void WM::onMessage(const char* name, const char* json) {
     // with the slide's frames on the Tab A7: 21-35 ms frames); the callbacks
     // go out when it ends.
     quietUntil_ = nowMs() + std::min(400.0, v["ms"].num());
+    gpuBoost(true);  // as a touch would: the governor ramps too slowly for a 250 ms slide
     if (perfEvery_) logf("quiet %.0f ms at %.0f", v["ms"].num(), nowMs());
     wl_event_source_timer_update(quietTimer_, int(std::min(400.0, v["ms"].num())) + 1);
   } else if (n == "wm:textInputClosed") {
