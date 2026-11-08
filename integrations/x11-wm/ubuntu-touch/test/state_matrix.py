@@ -421,16 +421,20 @@ def run(apps, rep, only):
             rep.step(f"{name}: fullscreen off", lambda: ctl(f'wm wm:fullscreen {{"id":{wid},"on":false}}'), win(wid, "fullscreen", False))
             ctl(f'wm wm:minimize {{"id":{wid}}}'); time.sleep(0.5)
             rep.step(f"{name}: minimized and restored", lambda: ctl(f'wm wm:restore {{"id":{wid}}}'), win(wid, "minimized", False))
-            if deg == 90:
-                stop(name)
-                ids.pop(name, None)
-        # leave it open (portrait) for the pairs below
+            # Closed after each pass: four GPU apps at once drove the Tab A7
+            # into swap and its windows behind took seconds to follow.
+            stop(name)
+            ids.pop(name, None)
     if len(apps) < 2 or not want("pairs"):
         return
     for i in range(len(apps)):
         a, b = apps[i], apps[(i + 1) % len(apps)]
         if a == b:
             continue
+        for name in list(ids):
+            if name not in (a, b):
+                stop(name)
+                ids.pop(name)
         for name in (a, b):
             if name not in ids:
                 rotate(90)
