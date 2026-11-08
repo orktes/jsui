@@ -147,7 +147,10 @@ sk_sp<SkImage> wrapTexture(GrDirectContext* ctx, const JsuiTexture& t) {
   if (t.kind != JSUI_TEXTURE_GL || !ctx) return nullptr;
   unsigned format = t.format ? t.format : kGL_RGBA8;
   SkColorType ct;
-  if (format == kGL_RGBA8) ct = kRGBA_8888_SkColorType;
+  // JSUI_TEXTURE_OPAQUE ignores alpha: RGB_888x samples it as 1. An opaque
+  // alpha type alone lets whatever is in the alpha channel (an XRGB
+  // buffer's X byte) through to blending.
+  if (format == kGL_RGBA8) ct = (t.flags & JSUI_TEXTURE_OPAQUE) ? kRGB_888x_SkColorType : kRGBA_8888_SkColorType;
   else if (format == kGL_BGRA8) ct = kBGRA_8888_SkColorType;
   else return nullptr;
   GrGLTextureInfo info;
