@@ -25,6 +25,7 @@ import { Window } from './Window.jsx';
 import { appName, cleanName, homeApps, pinHome, setSetting, useApps, usePopups, useScreen, useSettings, useSystem, useWindows, wasDismissed, wm } from './wm.js';
 
 const OSK_HOLD_MS = 600;
+const OSK_OFF = 480; // px down: the keyboard (and its shadow) below the screen
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -547,12 +548,15 @@ function Shell() {
   // field in the focused app wants it (wm:textInput).
   const [autoOsk, setAutoOsk] = useState(false);
   const oskOn = settings.osk || autoOsk;
-  // Closing, the app's room is given back in the same task (wm.osk(0)), not
-  // in the effect after the shell's render (~40 ms later on the Tab A7): the
-  // app starts its resize that much sooner.
+  // The app's room changes in the task that opens or closes the keyboard
+  // (wm.osk), not in the effect after the shell's render (~40 ms later on
+  // the Tab A7): the app starts its resize that much sooner.
   const oskByUser = settings.osk;
+  const oskRectRef = useRef(null);
+  oskRectRef.current = oskRect;
   useHostMessage('wm:textInput', (msg) => {
-    if (!msg.show && !oskByUser) wm.osk(0);
+    if (msg.show && oskRectRef.current) wm.osk(oskRectRef.current.height);
+    else if (!msg.show && !oskByUser) wm.osk(0);
     setAutoOsk(!!msg.show);
   });
   const hideOsk = useCallback(() => {
@@ -563,28 +567,45 @@ function Shell() {
   // Apps make room for it (the host shrinks their work area).
   const oskHeight = oskOn && oskRect ? oskRect.height : 0;
   useEffect(() => wm.osk(oskHeight), [oskHeight]);
-  // Closing, the keyboard stays drawn (inert) until the focused app has
-  // grown into its room: the app commits its new size some time after the
-  // host tells it (Claude Desktop, an Electron app, takes a while), and
-  // meanwhile the wallpaper showed where the keyboard had been. Only for a
-  // maximized or split window (the work area resizes it), at most OSK_HOLD_MS.
+  // The keyboard slides (natively): up as it opens, over the app's taller
+  // frame, which the host keeps showing until the app commits its shorter
+  // one; closing, it stays (inert) until the focused app has grown into its
+  // room (Claude Desktop, an Electron app, takes a few hundred ms to draw at
+  // the new size: the wallpaper showed there meanwhile), at most
+  // OSK_HOLD_MS, then slides down over the full-size app. Only a maximized
+  // or split window is resized by the work area; others don't hold it.
+  // oskPhase: 'in' | 'hold' | 'out' | null (closed, below the screen).
+  const kbY = useRef(new Animated.Value(OSK_OFF)).current;
   const [oskPrev, setOskPrev] = useState(oskOn);
-  const [oskHold, setOskHold] = useState(null); // the app window's height when the keyboard closed
+  const [oskPhase, setOskPhase] = useState(oskOn ? 'in' : null);
+  const [oskHold, setOskHold] = useState(null); // {id, h}: the app window and its height when the keyboard closed
   if (oskPrev !== oskOn) {
     setOskPrev(oskOn);
     const w = map[active];
-    setOskHold(!oskOn && w && (w.maximized || w.snap) ? { id: w.id, h: w.h } : null);
+    const hold = !oskOn && w && (w.maximized || w.snap) ? { id: w.id, h: w.h } : null;
+    setOskHold(hold);
+    setOskPhase(oskOn ? 'in' : hold ? 'hold' : oskPhase ? 'out' : null);
   }
   const heldWin = oskHold && map[oskHold.id];
   useEffect(() => {
-    if (!oskHold) return undefined;
-    const id = setTimeout(() => setOskHold(null), OSK_HOLD_MS);
-    return () => clearTimeout(id);
-  }, [oskHold]);
+    if (oskPhase === 'in') {
+      Animated.timing(kbY, { toValue: 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+      return undefined;
+    }
+    if (oskPhase === 'hold') {
+      const id = setTimeout(() => setOskPhase('out'), OSK_HOLD_MS);
+      return () => clearTimeout(id);
+    }
+    if (oskPhase === 'out') {
+      const a = Animated.timing(kbY, { toValue: OSK_OFF, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+      a.start(({ finished }) => finished && setOskPhase((p) => (p === 'out' ? null : p)));
+      return () => a.stop();
+    }
+    return undefined;
+  }, [oskPhase, kbY]);
   useEffect(() => {
-    if (oskHold && (!heldWin || heldWin.h > oskHold.h)) setOskHold(null);
-  }, [oskHold, heldWin && heldWin.h]); // eslint-disable-line react-hooks/exhaustive-deps
-  const oskDrawn = oskOn || !!oskHold;
+    if (oskPhase === 'hold' && (!heldWin || heldWin.h > oskHold.h)) setOskPhase('out');
+  }, [oskPhase, heldWin && heldWin.h]); // eslint-disable-line react-hooks/exhaustive-deps
   const [notes, setNotes] = useState([]);
   const [toasts, setToasts] = useState([]);
   // Locked, a notification only counts up the lock screen's pill: no toast.
@@ -999,11 +1020,11 @@ function Shell() {
         {dockMenu && (
           <DockMenu item={dockMenu} anchor={dockRect && { x: dockRect.x + dockRect.width / 2, width: 0 }} onClose={() => setDockMenu(null)} />
         )}
-        {oskDrawn && (
-          <View pointerEvents={oskOn ? 'box-none' : 'none'} style={StyleSheet.absoluteFill}>
-            <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />
-          </View>
-        )}
+        {/* Mounted from the start, below the screen while closed: mounting it
+            as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
+        <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'} style={[StyleSheet.absoluteFill, { transform: [{ translateY: kbY }] }]}>
+          <Keyboard screen={scr} onMeasure={setOskRect} onHide={hideOsk} />
+        </Animated.View>
         {locked && (
           <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>
             <Wallpaper width={scr.width} height={scr.height} t={t} />

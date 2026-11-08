@@ -380,7 +380,7 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             borderTopRightRadius: decorated ? 0 : corner,
           }}
         >
-          <HostTexture name={`win:${win.id}`} style={{ width: g.w, height: g.h }} resizeMode="stretch" />
+          <WinTexture win={win} width={g.w} height={g.h} />
         </View>
       </View>
       {resizable && (
@@ -397,6 +397,23 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
     </Animated.View>
   );
 });
+
+// A window's texture at `width` x `height`. `win.crop` (the host's): the
+// part of the buffer the window shows, as fractions of it (a viewport source
+// rect: Chromium resizing draws into a bigger buffer and crops it); the rest
+// is cut off here (stretched whole, the window showed squeezed with black
+// below).
+export function WinTexture({ win, width, height }) {
+  const c = win.crop;
+  if (!c) return <HostTexture name={`win:${win.id}`} style={{ width, height }} resizeMode="stretch" />;
+  const w = width / c[2];
+  const h = height / c[3];
+  return (
+    <View style={{ width, height, overflow: 'hidden' }}>
+      <HostTexture name={`win:${win.id}`} style={{ position: 'absolute', left: -c[0] * w, top: -c[1] * h, width: w, height: h }} resizeMode="stretch" />
+    </View>
+  );
+}
 
 const styles = StyleSheet.create({
   frame: { position: 'absolute' },
