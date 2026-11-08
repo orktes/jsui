@@ -427,7 +427,7 @@ export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
   const tex = win.tex;
   const src = win.src && win.src[1] ? win.src : tex;
   const drawnH = src && src[1] ? Math.min(height, src[1] / pixelRatio) : height;
-  const short = tex && tex[1] && drawnH < height - 0.5;
+  const short = !!(tex && tex[1]) && drawnH < height - 0.5; // a boolean: `0 && …` rendered "0" as a text node (a new window has tex [0, 0]) and the shell threw
   const rest = height - drawnH;
   return (
     <View style={{ width, height, overflow: 'hidden', alignItems: 'flex-start' }}>
