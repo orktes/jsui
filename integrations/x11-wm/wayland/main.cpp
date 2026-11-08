@@ -553,6 +553,7 @@ struct Rect {
 
 enum class Target { None, Shell, Surface };
 
+class WM;
 struct Client {
   uint32_t id = 0;
   bool popup = false;
@@ -582,6 +583,7 @@ struct Client {
   // as fractions of the buffer: Chromium resizing (Claude Desktop) draws
   // into a bigger buffer and crops it. {0, 0, 1, 1}: all of it.
   float crop[4] = {0, 0, 1, 1};
+  int srcW = 0, srcH = 0;  // the viewport's source size in buffer px (all of it without one)
   bool hasTexture = false;
   bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
@@ -602,6 +604,10 @@ struct Client {
   // when it was last told its size again (see nudgeStale).
   double staleSince = 0, nudgedAt = -1e9;
   bool deferredCommit = false;  // committed during wm:quiet (onCommit)
+  double holdTexUntil = 0;  // grown: its new frames wait (onCommit)
+  unsigned commits = 0, grownAt = 0;  // commits seen; the one that grew it
+  wl_event_source* holdTimer = nullptr;
+  WM* wm = nullptr;
   mutable std::string publishedJson;  // what publishWindow last sent (cleared when it is unpublished)
   bool dialog = false;
   // A system prompt (the keyring's gcr-prompter, a polkit agent, pinentry):
@@ -866,6 +872,7 @@ class WM {
   bool captureGpu(Client* c);
   void setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish = true);
   static constexpr double kAwaitSizeMs = 600;
+  static constexpr double kGrowHoldMs = 400;
 
   void nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH);
   // Full-screen panels get a blurred snapshot of the screen under them
@@ -1392,6 +1399,7 @@ Client* WM::findSurface(wlr_surface* s) {
 
 void WM::newToplevel(wlr_xdg_surface* xdg) {
   auto* c = new Client;
+  c->wm = this;
   c->id = nextId_++;
   c->xdg = xdg;
   c->tl = xdg->toplevel;
@@ -1445,6 +1453,7 @@ void WM::newToplevel(wlr_xdg_surface* xdg) {
 
 void WM::newPopup(wlr_xdg_popup* popup) {
   auto* c = new Client;
+  c->wm = this;
   c->id = nextId_++;
   c->popup = true;
   c->xdg = popup->base;
@@ -1666,6 +1675,7 @@ void WM::fitMaximized(Client* c) {
 
 void WM::onCommit(Client* c) {
   if (!c->xdg->initialized) return;
+  c->commits++;
   // wm:quiet (the keyboard sliding): a shown window keeps its last frame and
   // size until the slide lands (its new frame, a texture to import and a
   // move for the shell to lay out, cost 14-27 ms frames mid-slide).
@@ -1703,6 +1713,15 @@ void WM::onCommit(Client* c) {
     VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
     c->w = geo.width;
     c->h = geo.height;
+    // Grown: Chromium's first frame at the new size has its new part
+    // unpainted (black, a band under the app as the keyboard went, until it
+    // drew again). Its last frame stays until a later commit, at most
+    // kGrowHoldMs (the shell carries its bottom row down, see Window.jsx
+    // WinTexture).
+    if (geo.height > c->h + 2 && c->hasTexture && gpuApps_) {
+      c->holdTexUntil = nowMs() + kGrowHoldMs;
+      c->grownAt = c->commits;
+    }
     c->awaitUntil = 0;
     setCrop(c, c->xdg->surface, c->xdg->surface->current.buffer_width, c->xdg->surface->current.buffer_height, false);
     fitMaximized(c);
@@ -1774,6 +1793,12 @@ double WM::popupFit(Client* p) {
 }
 
 void WM::capture(Client* c) {
+  // wm:quiet (see onCommit): its new frame (and its patch to the shell)
+  // when the slide lands.
+  if (c->mapped && !c->popup && c->hasTexture && nowMs() < quietUntil_) {
+    c->deferredCommit = true;
+    return;
+  }
   // No buffer (a closing app's last commit): keep the last frame, which the
   // shell animates out. Capturing would swap it for an empty texture, and
   // the window blinked out for a few frames before its closing copy showed.
@@ -2066,6 +2091,12 @@ void WM::nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH) {
 void WM::setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish) {
   float k[4] = {0, 0, 1, 1};
   const auto& vp = s->current.viewport;
+  const int sc0 = std::max(1, int(s->current.scale));
+  const int sw = vp.has_src && vp.src.width > 0 ? int(std::lround(vp.src.width * sc0)) : bufW;
+  const int sh = vp.has_src && vp.src.height > 0 ? int(std::lround(vp.src.height * sc0)) : bufH;
+  const bool srcChanged = sw != c->srcW || sh != c->srcH;
+  c->srcW = sw;
+  c->srcH = sh;
   if ((vp.has_src || vp.has_dst) && bufW > 0 && bufH > 0) {
     const float sc = float(std::max(1, int(s->current.scale)));
     if (vp.has_src && vp.src.width > 0 && vp.src.height > 0) {
@@ -2088,13 +2119,28 @@ void WM::setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish) {
     // A pixel of rounding (2001 x 774 drawn into 2000 x 774) is no crop.
     if (k[0] * bufW < 1 && k[1] * bufH < 1 && std::abs(1 - k[2]) * bufW <= 1 && std::abs(1 - k[3]) * bufH <= 1) k[0] = k[1] = 0, k[2] = k[3] = 1;
   }
-  if (std::equal(k, k + 4, c->crop)) return;
+  if (std::equal(k, k + 4, c->crop) && !srcChanged) return;
   std::copy(k, k + 4, c->crop);
   if (publish) publishWindow(c);
 }
 
 bool WM::captureGpu(Client* c) {
 #ifdef JSUI_WL_MIR_GL
+  if (c->holdTexUntil > 0) {
+    const double left = c->holdTexUntil - nowMs();
+    if (left > 0 && c->commits <= c->grownAt + 1) {
+      // Taken again once it lapses (the frame-done backstop, or the next commit).
+      if (!c->holdTimer) c->holdTimer = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+        auto* cl = static_cast<Client*>(u);
+        cl->holdTexUntil = 0;
+        if (cl->wm) cl->wm->capture(cl);
+        return 0;
+      }, c);
+      wl_event_source_timer_update(c->holdTimer, int(left) + 1);
+      return true;
+    }
+    c->holdTexUntil = 0;
+  }
   // The surface whose GPU buffer is the window: the root's, or a subsurface
   // that covers the whole window (Firefox on the GPU draws into a
   // subsurface over an shm root; compositing that on the CPU read nothing of
@@ -2171,8 +2217,10 @@ bool WM::captureGpu(Client* c) {
     gpuBuffers_[c->id] = copied ? nullptr : wlr_buffer_lock(buf);
     if (held) wlr_buffer_unlock(held);
   }
+  const bool texResized = c->texW != buf->width || c->texH != buf->height;
   c->texW = buf->width;
   c->texH = buf->height;
+  if (texResized) publishWindow(c);  // `tex` (the shell extends its bottom row under a sliding keyboard)
   c->rgba.clear();
   setCrop(c, pick.best, buf->width, buf->height);
   nudgeStale(c, pick.best, buf->width, buf->height);
@@ -2555,6 +2603,7 @@ void WM::onDestroy(Client* c) {
   if (c->mapped) onUnmap(c);
   unhook(c->hooks);
   clients_.erase(c->id);
+  if (c->holdTimer) wl_event_source_remove(c->holdTimer);
   delete c;
 }
 
@@ -3195,6 +3244,7 @@ void WM::onMessage(const char* name, const char* json) {
     setLevels(v, false);
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
+
   } else if (n == "wm:osk") {
     int h = P(v["height"].num());
     if (perfEvery_) logf("osk %d at %.0f", h, nowMs());
@@ -3262,7 +3312,8 @@ std::string WM::windowJson(const Client* c) const {
                   (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
                   "\"" + slot + ",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
                   ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) +
-                  ",\"fit\":" + wmjson::num(c->fit) +
+                  ",\"fit\":" + wmjson::num(c->fit) + ",\"tex\":[" + std::to_string(c->texW) + "," + std::to_string(c->texH) + "]" +
+                  ",\"src\":[" + std::to_string(c->srcW) + "," + std::to_string(c->srcH) + "]" +
                   (c->crop[2] != 1 || c->crop[3] != 1 || c->crop[0] > 0 || c->crop[1] > 0
                        ? ",\"crop\":[" + wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," +
                              wmjson::num(c->crop[3]) + "]"

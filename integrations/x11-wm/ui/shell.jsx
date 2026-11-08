@@ -32,6 +32,7 @@ const OSK_HOLD_MS = 600;
 // rendered it again, 12-19 ms each, also while partly off the screen).
 const OSK_OFF = 320; // layout px (~560 screen px; the keyboard is ~263)
 const OSK_REST = OSK_OFF - 2;
+const KB_GRAB = 24; // the keyboard's grab strip reaches this far above its top edge
 
 // ---------------------------------------------------------------- Wallpaper
 
@@ -495,6 +496,30 @@ const nowText = () => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+// Below the active window when it is shorter than the screen (the keyboard
+// up, or gone and the app not grown back yet): its bottom row of pixels
+// drawn down to the screen's bottom. What a drag or the slide down uncovers before
+// the app has grown back is the app's own edge carried on (its background,
+// mostly), not the wallpaper; the app's new frame covers it as it lands.
+function EdgeFill({ win, screen }) {
+  const r = screen.pixelRatio || 1;
+  const tex = win.tex;
+  // Not under an app kept at a size of its own (scaled to fit, centred).
+  if (!tex || !tex[0] || !tex[1] || (win.fit != null && win.fit < 0.999)) return null;
+  const srcH = win.src && win.src[1] ? win.src[1] : tex[1];
+  const rowPx = Math.max(0, Math.min(srcH, Math.round(win.h * r)) - 1);
+  const top = win.y + win.h;
+  const h = screen.height - top;
+  if (h <= 0) return null;
+  // One texture px row stretched to h: the texture drawn tex[1] * h tall.
+  return (
+    <View pointerEvents="none" style={{ position: 'absolute', left: win.x, top, width: win.w, height: h, overflow: 'hidden' }}>
+      <HostTexture name={`win:${win.id}`} resizeMode="stretch"
+        style={{ position: 'absolute', left: 0, top: -rowPx * h, width: tex[0] / r, height: tex[1] * h }} />
+    </View>
+  );
+}
+
 function Shell() {
   const screen = useScreen();
   const dims = useWindowDimensions();
@@ -602,6 +627,44 @@ function Shell() {
   const hideOskRef = useRef(hideOsk);
   hideOskRef.current = hideOsk;
   const hideOskStable = useCallback(() => hideOskRef.current(), []);
+  // Drag down to dismiss (the grab strip on its top edge): kbShown is the
+  // slide plus the finger's travel down, both native.
+  const kbDrag = useNativeDragY();
+  const kbFlung = useRef(false);
+  const kbShown = useMemo(
+    () => Animated.add(kbY, kbDrag.dy.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolateLeft: 'clamp' })),
+    [kbY, kbDrag],
+  );
+  const kbPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: () => kbDrag.on.setValue(1),
+        onPanResponderRelease: (e, g) => {
+          const d = Math.max(0, g.dy);
+          // The finger's offset folded into the slide's value, same frame.
+          kbY.setValue(d);
+          kbDrag.on.setValue(0);
+          if (d > 70 || (d > 10 && g.vy > 0.5)) {
+            if (settingsOskRef.current) setSetting('osk', false);
+            kbFlung.current = true;
+            hideOskRef.current(); // slides on down from there
+          } else {
+            Animated.spring(kbY, { toValue: 0, tension: 180, friction: 22, useNativeDriver: true }).start();
+          }
+        },
+        onPanResponderTerminate: () => {
+          kbDrag.on.setValue(0);
+          Animated.spring(kbY, { toValue: 0, tension: 180, friction: 22, useNativeDriver: true }).start();
+        },
+      }),
+    [kbY, kbDrag],
+  );
+  const settingsOskRef = useRef(settings.osk);
+  settingsOskRef.current = settings.osk;
+  const kbH = oskRect ? oskRect.height : 263;
   // In screen coordinates (its box is the bottom OSK_OFF px of the screen).
   const scrH = useRef(0);
   scrH.current = dims.height;
@@ -626,7 +689,10 @@ function Shell() {
   if (oskPrev !== oskOn) {
     setOskPrev(oskOn);
     const w = map[active];
-    const hold = !oskOn && w && (w.maximized || w.snap) ? { id: w.id, h: w.h } : null;
+    // Flung away (drag to dismiss): it goes on down at once; the app's
+    // bottom edge carried down under it (EdgeFill) until it has grown.
+    const hold = !oskOn && !kbFlung.current && w && (w.maximized || w.snap) ? { id: w.id, h: w.h } : null;
+    kbFlung.current = false;
     setOskHold(hold);
     setOskPhase(oskOn ? 'in' : hold ? 'hold' : oskPhase ? 'out' : null);
   }
@@ -817,7 +883,7 @@ function Shell() {
       const cx = seamOf(split, scr);
       r.push(stacked(split) ? [0, cx - 16, W, 32] : [cx - 16, scr.topBar, 32, H - scr.topBar - bottom]);
     }
-    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y, oskRect.width, oskRect.height]);
+    if (oskOn && oskRect) r.push([oskRect.x, oskRect.y - KB_GRAB, oskRect.width, oskRect.height + KB_GRAB]); // and its grab strip
     // Toasts take a tap (it puts them away), not the app under them.
     if (toasts.length) r.push([(W - 400) / 2, scr.topBar + 10, 400, toasts.length * 92]);
     return r;
@@ -988,6 +1054,7 @@ function Shell() {
     <ThemeContext.Provider value={t}>
       <View style={styles.root}>
         <Wallpaper width={scr.width} height={scr.height} t={t} />
+        {map[active] && (map[active].maximized || map[active].snap) && !overviewUp && <EdgeFill win={map[active]} screen={scr} />}
         {!visible.some((w) => !w.prompt) && <Home screen={scr} t={t} note={notes.find((n) => n.notifyId != null && Date.now() - n.at < 3600e3)} apps={apps} settings={settings} onLaunch={launch} onCalendar={() => setPanel('calendar')} onAllApps={openLauncher} />}
         {split && !overviewUp && <SplitPanes split={split} screen={scr} t={t} />}
         {[...windows, ...closingNow.filter((c) => !map[c.id])].map((w) =>
@@ -1071,8 +1138,15 @@ function Shell() {
         {/* Mounted from the start, below the screen while closed: mounting it
             as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
         <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'}
-          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbY }] }}>
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbShown }] }}>
           <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} />
+          {/* Its top edge (and a strip above it) takes a drag down: the
+              keyboard follows the finger natively, and on release goes
+              (far or fast enough) or springs back. */}
+          <Animated.View {...kbPan.panHandlers} {...kbDrag.handlers}
+            style={{ position: 'absolute', left: 0, right: 0, top: OSK_OFF - kbH - KB_GRAB, height: KB_GRAB + 14, alignItems: 'center' }}>
+            <View pointerEvents="none" style={{ marginTop: KB_GRAB + 4, width: 40, height: 5, borderRadius: 3, backgroundColor: t.textMute, opacity: 0.6 }} />
+          </Animated.View>
         </Animated.View>
         {locked && (
           <LockScreen screen={scr} notifications={notes} onUnlock={() => { wm.haptic(18); setLocked(false); }}>

@@ -420,9 +420,26 @@ export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
   if (fill || (win.fit != null && win.fit < 0.999)) {
     return <HostTexture name={`win:${win.id}`} style={{ width, height }} resizeMode="stretch" />;
   }
+  // Shorter than the window (it grew, its new frame not drawn yet), or
+  // drawn only in part of its buffer (`src`, a viewport's source: Chromium
+  // resizing leaves the rest unpainted, black): the drawn part 1:1, then its
+  // bottom row carried on down to the window's bottom, not the background.
+  const tex = win.tex;
+  const src = win.src && win.src[1] ? win.src : tex;
+  const drawnH = src && src[1] ? Math.min(height, src[1] / pixelRatio) : height;
+  const short = tex && tex[1] && drawnH < height - 0.5;
+  const rest = height - drawnH;
   return (
     <View style={{ width, height, overflow: 'hidden', alignItems: 'flex-start' }}>
-      <HostTexture name={`win:${win.id}`} scale={pixelRatio} style={{ position: 'absolute', left: 0, top: 0 }} />
+      {short && (
+        <View style={{ position: 'absolute', left: 0, top: drawnH, width, height: rest, overflow: 'hidden' }}>
+          <HostTexture name={`win:${win.id}`} resizeMode="stretch"
+            style={{ position: 'absolute', left: 0, top: -(src[1] - 1) * rest, width: tex[0] / pixelRatio, height: tex[1] * rest }} />
+        </View>
+      )}
+      <View style={{ position: 'absolute', left: 0, top: 0, width, height: drawnH, overflow: 'hidden' }}>
+        <HostTexture name={`win:${win.id}`} scale={pixelRatio} style={{ position: 'absolute', left: 0, top: 0 }} />
+      </View>
     </View>
   );
 }
