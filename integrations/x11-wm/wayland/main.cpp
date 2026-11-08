@@ -601,6 +601,8 @@ struct Client {
   // Drawn stretched (a viewport scaling an old-size buffer) since when, and
   // when it was last told its size again (see nudgeStale).
   double staleSince = 0, nudgedAt = -1e9;
+  bool deferredCommit = false;  // committed during wm:quiet (onCommit)
+  mutable std::string publishedJson;  // what publishWindow last sent (cleared when it is unpublished)
   bool dialog = false;
   // A system prompt (the keyring's gcr-prompter, a polkit agent, pinentry):
   // a parentless toplevel shown as a centred dialog over whatever is on
@@ -664,6 +666,8 @@ class WM {
   FractionalScale fractional_;
   void setSize(Client* c, int w, int h);  // screen px -> the client's units
   int oskH_ = 0;
+  double quietUntil_ = 0;  // wm:quiet
+  wl_event_source* quietTimer_ = nullptr;
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
   std::string savedSettings_;
@@ -992,6 +996,16 @@ bool WM::setup() {
   });
   display_ = wl_display_create();
   loop_ = wl_display_get_event_loop(display_);
+  quietTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+    auto* w = static_cast<WM*>(u);
+    for (auto& [id, c] : w->clients_)
+      if (c->deferredCommit) {
+        c->deferredCommit = false;
+        w->onCommit(c);
+      }
+    w->sendFrameDone();
+    return 0;
+  }, this);
   backend_ = wlr_backend_autocreate(display_, nullptr);
   if (!backend_) {
     logf("cannot create a wlroots backend (WLR_BACKENDS=headless for no screen)");
@@ -1152,6 +1166,7 @@ bool WM::setup() {
   seat_ = wlr_seat_create(display_, "seat0");
   wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
   auto onPanel = [this](bool show) {
+    if (perfEvery_) logf("text input %s at %.0f", show ? "on" : "off", nowMs());
     jsui_post_message(rt_, "wm:textInput", show ? "{\"show\":true}" : "{\"show\":false}");
     scheduleTick(0);
   };
@@ -1651,6 +1666,13 @@ void WM::fitMaximized(Client* c) {
 
 void WM::onCommit(Client* c) {
   if (!c->xdg->initialized) return;
+  // wm:quiet (the keyboard sliding): a shown window keeps its last frame and
+  // size until the slide lands (its new frame, a texture to import and a
+  // move for the shell to lay out, cost 14-27 ms frames mid-slide).
+  if (c->mapped && !c->popup && c->hasTexture && nowMs() < quietUntil_) {
+    c->deferredCommit = true;
+    return;
+  }
   if (!c->popup && !c->placed && c->xdg->initial_commit) place(c);
   if (!c->popup && !c->placed) {
     place(c);
@@ -2517,6 +2539,7 @@ void WM::onUnmap(Client* c) {
   releaseAt_[c->id] = nowMs() + 1500;
   if (perf_) frameLog_ = 24;  // JSUI_WL_PERF: every frame of the close animation
   if (perf_) logf("unmap %u at %.0f", c->id, nowMs());
+  c->publishedJson.clear();
   std::string j = "{\"" + std::to_string(c->id) + "\":null}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   publishStack();
@@ -3179,6 +3202,14 @@ void WM::onMessage(const char* name, const char* json) {
       oskH_ = h;
       refitWorkArea();
     }
+  } else if (n == "wm:quiet") {
+    // The shell animates something big (the keyboard sliding): apps get no
+    // frame callbacks for `ms`, so they don't draw (their GPU work competed
+    // with the slide's frames on the Tab A7: 21-35 ms frames); the callbacks
+    // go out when it ends.
+    quietUntil_ = nowMs() + std::min(400.0, v["ms"].num());
+    if (perfEvery_) logf("quiet %.0f ms at %.0f", v["ms"].num(), nowMs());
+    wl_event_source_timer_update(quietTimer_, int(std::min(400.0, v["ms"].num())) + 1);
   } else if (n == "wm:textInputClosed") {
     textInput_.panelClosed();
   } else if (n == "wm:release") {
@@ -3248,7 +3279,13 @@ void WM::publishWindow(const Client* c) {
     if (was.first != c->w || was.second != c->h) logf("window %u %dx%d at %.0f", c->id, c->w, c->h, nowMs());
     was = {c->w, c->h};
   }
-  std::string j = "{\"" + std::to_string(c->id) + "\":" + windowJson(c) + "}";
+  std::string w = windowJson(c);
+  // Unchanged (a configure that moved nothing): no patch, so no render of
+  // the shell (one landed mid-way through each keyboard slide, ~40 ms of JS
+  // and a full repaint).
+  if (w == c->publishedJson) return;
+  c->publishedJson = w;
+  std::string j = "{\"" + std::to_string(c->id) + "\":" + w + "}";
   jsui_patch_state(rt_, "wm.windows", j.c_str());
   scheduleTick(0);
 }
@@ -3985,6 +4022,7 @@ void WM::armFrameDone() {
 }
 
 void WM::sendFrameDone() {
+  if (nowMs() < quietUntil_) return;  // wm:quiet: quietTimer_ sends them
   timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   if (frameDoneArmed_) {

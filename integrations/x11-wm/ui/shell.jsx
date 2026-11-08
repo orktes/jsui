@@ -560,9 +560,36 @@ function Shell() {
   const oskByUser = settings.osk;
   const oskRectRef = useRef(null);
   oskRectRef.current = oskRect;
+  // Showing, the slide starts in the task of the app's request (a task's
+  // commands reach the runtime when it ends: after the shell's render,
+  // ~40 ms on the Tab A7, had it changed state there).
+  const kbY = useRef(new Animated.Value(OSK_REST)).current;
+  const oskOnRef = useRef(oskOn);
+  oskOnRef.current = oskOn;
+  // Apps draw no frames while it slides (wm.quiet: their GPU work made the
+  // slide's frames 21-35 ms on the Tab A7); they catch up as it lands.
+  const slideKbIn = useCallback((landed) => {
+    wm.quiet(260);
+    Animated.timing(kbY, { toValue: 0, duration: 250, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start(landed);
+  }, [kbY]);
+  const kbEarly = useRef(false);
   useHostMessage('wm:textInput', (msg) => {
-    if (msg.show && oskRectRef.current) wm.osk(oskRectRef.current.height);
-    else if (!msg.show && !oskByUser) wm.osk(0);
+    if (msg.show && !oskOnRef.current) {
+      if (kbEarly.current) return; // the app asks again (enable, then commit): sliding already
+      if (oskRectRef.current) wm.osk(oskRectRef.current.height);
+      kbEarly.current = true;
+      // The shell's own changes for an open keyboard (dock and home bar
+      // gone, regions) once it has landed: committed mid-slide they cost
+      // two 27-41 ms frames.
+      slideKbIn(() => setAutoOsk(true));
+      return;
+    }
+    if (!msg.show && !oskByUser) {
+      // The app's room back now, the shell's render in the next task.
+      wm.osk(0);
+      setTimeout(() => setAutoOsk(false), 0);
+      return;
+    }
     setAutoOsk(!!msg.show);
   });
   const hideOsk = useCallback(() => {
@@ -593,7 +620,6 @@ function Shell() {
   // OSK_HOLD_MS, then slides down over the full-size app. Only a maximized
   // or split window is resized by the work area; others don't hold it.
   // oskPhase: 'in' | 'hold' | 'out' | null (closed, below the screen).
-  const kbY = useRef(new Animated.Value(OSK_REST)).current;
   const [oskPrev, setOskPrev] = useState(oskOn);
   const [oskPhase, setOskPhase] = useState(oskOn ? 'in' : null);
   const [oskHold, setOskHold] = useState(null); // {id, h}: the app window and its height when the keyboard closed
@@ -607,7 +633,8 @@ function Shell() {
   const heldWin = oskHold && map[oskHold.id];
   useEffect(() => {
     if (oskPhase === 'in') {
-      Animated.timing(kbY, { toValue: 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+      if (kbEarly.current) kbEarly.current = false; // started by the request (above)
+      else slideKbIn(undefined);
       return undefined;
     }
     if (oskPhase === 'hold') {
@@ -615,12 +642,13 @@ function Shell() {
       return () => clearTimeout(id);
     }
     if (oskPhase === 'out') {
-      const a = Animated.timing(kbY, { toValue: OSK_REST, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+      wm.quiet(230);
+      const a = Animated.timing(kbY, { toValue: OSK_REST, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true });
       a.start(({ finished }) => finished && setOskPhase((p) => (p === 'out' ? null : p)));
       return () => a.stop();
     }
     return undefined;
-  }, [oskPhase, kbY]);
+  }, [oskPhase, kbY, slideKbIn]);
   useEffect(() => {
     // Grown, and drawn at its new size (crop above 1: a smaller old frame shown 1:1 over it, see Window.jsx WinTexture).
     const stretched = heldWin && heldWin.crop && (heldWin.crop[2] > 1.001 || heldWin.crop[3] > 1.001);

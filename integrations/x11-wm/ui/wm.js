@@ -22,6 +22,7 @@ export const wm = {
   // The on-screen keyboard: its height on screen (0: hidden), and that the
   // user closed one an app had asked for.
   osk: (height) => send('wm:osk', { height }),
+  quiet: (ms) => send('wm:quiet', { ms }),
   textInputClosed: () => send('wm:textInputClosed'),
   // A blurred copy of the screen as host texture "wm:backdrop" (on: false drops it).
   snapshot: (on) => send('wm:snapshot', { on }),

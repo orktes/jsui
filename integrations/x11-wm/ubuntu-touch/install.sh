@@ -72,6 +72,11 @@ case " $* " in *" --system "*)
       sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-gpu-boost.service &&
       echo "GPU touch boost enabled (applies when the session next starts)."
   fi
+  # adb: a restarted adbd gets its USB gadget re-attached (adbd-rebind.conf).
+  if systemctl cat adbd.service >/dev/null 2>&1 && [ -d /sys/kernel/config/usb_gadget ]; then
+    sudo install -m 644 -D "$DEST/adbd-rebind.conf" /etc/systemd/system/adbd.service.d/jsui-rebind.conf &&
+      sudo systemctl daemon-reload && echo "adbd: USB re-attached after a restart."
+  fi
   # Wi-Fi: the stock vendor loads a Wi-Fi module this kernel refuses; wifi-on.sh
   # loads the kernel's own, and only once that worked installs it for every boot.
   if [ -e /vendor/lib/modules/qca_cld3_wlan.ko ] && modinfo wlan >/dev/null 2>&1 &&
