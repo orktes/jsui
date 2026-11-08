@@ -65,6 +65,30 @@ class TextInputV3 {
     wlr_text_input_v3_send_done(ti);
   }
 
+  // The on-screen keyboard went away by other means (dragged down, its Hide
+  // key) while the field still has focus: the app's next commit (a tap in
+  // the field moves the caret) asks for it again.
+  void panelClosed() {
+    for (Input* in : inputs_) in->shown = false;
+  }
+
+  // The focused field has a text input enabled but the panel is down
+  // (panelClosed): show it again (a tap in the field, which may not make the
+  // app commit anything new). False when there is nothing to show.
+  bool reshow() {
+    for (Input* in : inputs_)
+      if (in->ti->current_enabled && focus_ && in->ti->focused_surface == focus_ && !in->shown) {
+        panel(in, true);
+        return true;
+      }
+    return false;
+  }
+  bool hiddenActive() const {
+    for (Input* in : inputs_)
+      if (in->ti->current_enabled && focus_ && in->ti->focused_surface == focus_ && !in->shown) return true;
+    return false;
+  }
+
   // The keyboard focus moved to `surface` (null: none).
   void focus(wlr_surface* surface) {
     focus_ = surface;
