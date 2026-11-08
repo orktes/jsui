@@ -1123,7 +1123,7 @@ function Shell() {
             paints a laid-out grid with its text shaped and icons decoded,
             not a fresh tree (a ~50 ms frame on the Tab A7). */}
         <Guard name="launcher">
-          <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall} api={launcherApi}
+          <Launcher screen={scr} apps={apps} settings={settings} onLaunch={launch} open={panel === 'launcher'} warm={warmLauncher} wallpaper={wall} api={launcherApi} kbHeight={oskRect ? oskRect.height : 0}
             onClose={closePanel} onClosed={panelClosed} />
         </Guard>
         {/* Over the launcher: the card grows out of the tapped icon as the
