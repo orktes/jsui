@@ -121,6 +121,7 @@ export const DEFAULT_SETTINGS = {
   nightLight: false,
   autoRotate: false, // follow the accelerometer (hosts with system.rotate)
   osk: false,
+  keyHaptics: true, // a light vibration per on-screen key press
   homeApps: null, // the apps picked for home (ids); null: homeApps() picks
   pinned: ['org.codeberg.dnkl.foot', 'debian-xterm', 'xterm', 'galculator', 'org.xfce.mousepad', 'pcmanfm', 'xclock', 'xeyes'],
 };

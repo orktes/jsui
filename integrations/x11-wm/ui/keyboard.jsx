@@ -32,9 +32,14 @@ const LABELS = { Escape: 'esc', Tab: 'tab', Ctrl: 'ctrl', ' ': '' };
 // field the keys are for): the field focused when a key goes down gets the
 // focus back before the key is typed.
 let typingInto = null;
+// A light tap of the vibrator per key press (settings.keyHaptics, on by
+// default), as a phone's keyboard gives; jsui-wl sends it to hfd in process.
+let keyHaptics = true;
 const keyDown = () => {
   typingInto = TextInput.State.currentlyFocusedInput() || typingInto;
+  if (keyHaptics) wm.haptic(KEY_TAP_MS);
 };
+const KEY_TAP_MS = 10;
 const refocus = () => {
   if (typingInto && TextInput.State.currentlyFocusedInput() !== typingInto) TextInput.State.focusTextInput(typingInto);
 };
@@ -64,7 +69,8 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
   );
 });
 
-export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide }) {
+export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, haptics = true }) {
+  keyHaptics = haptics;
   const t = useTheme();
   const [layer, setLayer] = useState('abc');
   const [shift, setShift] = useState(false);

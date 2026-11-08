@@ -1139,7 +1139,7 @@ function Shell() {
             as it opened cost its first frame ~35 ms (85 draws) on the Tab A7. */}
         <Animated.View pointerEvents={oskOn ? 'box-none' : 'none'}
           style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: OSK_OFF, opacity: 0.999, transform: [{ translateY: kbShown }] }}>
-          <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} />
+          <Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} haptics={settings.keyHaptics !== false} />
           {/* Its top edge (and a strip above it) takes a drag down: the
               keyboard follows the finger natively, and on release goes
               (far or fast enough) or springs back. */}
