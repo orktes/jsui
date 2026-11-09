@@ -331,6 +331,17 @@ def kb_show():
     ctl('post wm:textInput {"show":true}')
 
 
+def kb_field(wid):
+    """The keyboard the way a person gets it: a tap on the app's text field
+    (Firefox's address bar), so the app's own text input asks for it (and asks
+    again as it resizes), not the host message alone."""
+    for w in ctl.windows()["windows"]:
+        if w["id"] == wid:
+            x, y, ww, hh = w["rect"]
+            tap(x + ww * 0.45, y + 112)
+            return
+
+
 def kb_hide():
     ctl('post wm:textInput {"show":false}')
 
@@ -423,6 +434,13 @@ def run(apps, rep, only):
             rep.step(f"{name}: fullscreen off", lambda: ctl(f'wm wm:fullscreen {{"id":{wid},"on":false}}'), win(wid, "fullscreen", False))
             ctl(f'wm wm:minimize {{"id":{wid}}}'); time.sleep(0.5)
             rep.step(f"{name}: minimized and restored", lambda: ctl(f'wm wm:restore {{"id":{wid}}}'), win(wid, "minimized", False))
+            if name == "ff":
+                # Regression (2026-11-09): turned with the keyboard up for a
+                # focused field, Firefox was shown small in the middle.
+                rep.step(f"{name}: field focused, keyboard up", lambda: kb_field(wid), kb(True))
+                rep.step(f"{name}: field focused, turned to {other}", lambda: rotate(other), both(turned(other), kb(True)))
+                rep.step(f"{name}: field focused, turned back", lambda: rotate(deg), both(turned(deg), kb(True)))
+                rep.step(f"{name}: field focused, keyboard down", lambda: kb_hide(), kb(False))
             # Closed after each pass: four GPU apps at once drove the Tab A7
             # into swap and its windows behind took seconds to follow.
             stop(name)
@@ -458,6 +476,16 @@ def run(apps, rep, only):
             rep.step(f"{a}|{b}: switcher and back", lambda: switcher_roundtrip(ids[a]))
             rep.step(f"{a}|{b}: {a} maximized out of split", lambda: ctl(f'wm wm:maximize {{"id":{ids[a]},"on":true}}'), win(ids[a], "maximized", True))
             rep.step(f"{a}|{b}: {b} maximized", lambda: ctl(f'wm wm:maximize {{"id":{ids[b]},"on":true}}'), win(ids[b], "maximized", True))
+            # Regression (2026-11-09): split with the keyboard up (portrait:
+            # one on top), the window was tiny with a gap above the keyboard.
+            rep.step(f"{a}|{b}: keyboard up, maximized", lambda: kb_show(), kb(True))
+            rep.step(f"{a}|{b}: keyboard up, side by side", lambda: ctl(f'wm wm:split {{"left":{ids[a]},"right":{ids[b]}}}'),
+                     both(kb(True), win(ids[a], "snap", 1), win(ids[b], "snap", 2)))
+            rep.step(f"{a}|{b}: keyboard up in split, turned", lambda: rotate(0 if deg == 90 else 90), kb(True))
+            rep.step(f"{a}|{b}: keyboard up in split, turned back", lambda: rotate(deg), kb(True))
+            rep.step(f"{a}|{b}: keyboard down in split", lambda: kb_hide(), kb(False))
+            ctl(f'wm wm:maximize {{"id":{ids[a]},"on":true}}')
+            ctl(f'wm wm:maximize {{"id":{ids[b]},"on":true}}')
 
 
 def main():
