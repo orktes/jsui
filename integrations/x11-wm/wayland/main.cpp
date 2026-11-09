@@ -4823,6 +4823,11 @@ int main(int argc, char** argv) {
   g_appEnv = opt.appEnv;
   signal(SIGCHLD, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
+  // Layers in motion (the launcher's grid springing in, a switcher card
+  // growing) resampled bilinearly, not with Catmull-Rom: on the Tab A7's
+  // Adreno 610 the launcher's GPU time per frame went from 13.9 to 7.8
+  // Mcycles (painter.cpp motionSampling). JSUI_MOTION_SAMPLING=cubic: as before.
+  setenv("JSUI_MOTION_SAMPLING", "linear", 0);
   WM wm(opt);
   return wm.run();
 }
