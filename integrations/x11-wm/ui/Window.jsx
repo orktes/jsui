@@ -88,6 +88,19 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
       useNativeDriver: true,
     }).start();
   }, [win.ready, appear]);
+  // The screen turned: the app's frames are hidden until it has drawn its
+  // new size (win.settling, jsui-wl rotateTo / noteFrame), then fade in. Its
+  // first frames after the turn were its old layout in a corner with black
+  // beside it, or the old frame squeezed into the new shape.
+  const settle = useRef(new Animated.Value(win.settling ? 0 : 1)).current;
+  useEffect(() => {
+    if (win.settling) {
+      settle.stopAnimation();
+      settle.setValue(0);
+      return;
+    }
+    Animated.timing(settle, { toValue: 1, duration: 150, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+  }, [win.settling, settle]);
   // Minimize: shrink towards the dock; restore: back.
   useEffect(() => {
     Animated.timing(mini, {
@@ -382,14 +395,20 @@ export const Window = memo(function Window({ win, active, screen, apps, hidden, 
             width: g.w,
             height: g.h,
             overflow: 'hidden',
-            backgroundColor: t.chrome,
             borderBottomLeftRadius: corner,
             borderBottomRightRadius: corner,
             borderTopLeftRadius: decorated ? 0 : corner,
             borderTopRightRadius: decorated ? 0 : corner,
           }}
         >
-          <WinTexture win={win} width={g.w} height={g.h} pixelRatio={screen.pixelRatio || PixelRatio.get()} />
+          {/* Under the frame, seen while it is hidden (settling): the app's
+              icon on its background, as iPadOS shows a resizing app. */}
+          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: t.chrome, alignItems: 'center', justifyContent: 'center' }]}>
+            <AppIcon win={win} app={appEntry} size={72} />
+          </View>
+          <Animated.View style={{ width: g.w, height: g.h, backgroundColor: t.chrome, opacity: settle }}>
+            <WinTexture win={win} width={g.w} height={g.h} pixelRatio={screen.pixelRatio || PixelRatio.get()} />
+          </Animated.View>
         </View>
       </View>
       {resizable && (

@@ -212,6 +212,8 @@ def problems(st, w):
         out.append(f"stretched/old frame crop {w['crop']}")
     if w["awaiting"]:
         out.append("awaiting its new size")
+    if w.get("settling"):
+        out.append("settling after a turn (hidden)")
     return out
 
 
