@@ -2268,6 +2268,7 @@ struct RootRecord : NodeRecord {
   uint32_t passImageGen = 0;
   bool passRaster = false;
   int nodesUpdated = 0;  // PaintStats::nodesUpdated
+  SkIRect screen = SkIRect::MakeEmpty();  // the device rect of its last updateDamage pass (records are clipped to it)
   Backdrop backdrop;     // see updateBackdrop
 };
 
@@ -2332,6 +2333,12 @@ struct Ctx {
   bool approximated = false;
   // Painting into a cached layer's or raster-cached subtree's texture.
   bool inTexture = false;
+  // What paintNode culls subtrees against: the damage, or for a full
+  // repaint with current records the canvas' own area, so the nodes
+  // scrolled or clipped out of view (rows a list keeps mounted around its
+  // viewport) are skipped as a whole instead of rejected draw by draw.
+  // Null: nothing is culled.
+  const SkRegion* cull = nullptr;
 };
 
 sk_sp<SkMaskFilter> cachedBlur(RootRecord* root, float blur) {
@@ -3261,7 +3268,7 @@ void paintNode(Node* n, SkCanvas* c, Ctx& ctx) {
   // Incremental repaint: skip subtrees entirely outside the damage. Their
   // records were refreshed by updateDamage() this frame.
   const auto* rec = static_cast<const NodeRecord*>(n->paintCache.get());
-  if (ctx.damage && rec && rec->valid && !ctx.damage->intersects(rec->subtree)) {
+  if (ctx.cull && rec && rec->valid && !ctx.cull->intersects(rec->subtree)) {
     ctx.stats.nodesCulled++;
     if (ctx.occlusion) ctx.occlusion->pass(n, rec->subtree);
     return;
@@ -4344,6 +4351,7 @@ SkRegion updateDamage(Document& doc, int deviceWidth, int deviceHeight, ScrollBl
   SkRegion damage;
   if (blit) *blit = ScrollBlit{};
   SkIRect screen = SkIRect::MakeWH(deviceWidth, deviceHeight);
+  root->screen = screen;
   tMinOccluderArea = std::min<int64_t>(65536, int64_t(deviceWidth) * deviceHeight / 8);
   // New fonts change glyphs without changing any node: repaint everything.
   uint32_t fontGen = doc.fonts ? doc.fonts->generation : 0;
@@ -4515,6 +4523,21 @@ void paintDocumentOver(Document& doc, SkCanvas* canvas, const SkRegion* damage, 
                       ctx.layers && ctx.layers->impl->raster))
     ctx.occlusion = &occlusion;
   ctx.stats.occluders = occlusion.count;
+  // Subtree culling: against the damage, whose records updateDamage()
+  // refreshed this frame; without one, against the canvas when the records
+  // are as current (the conditions of occlusion culling above).
+  SkRegion visible;
+  if (damage) {
+    ctx.cull = damage;
+  } else if (root->valid && !doc.root()->paintTreeDirty() && root->inMatrix == ctx.snapSpace) {
+    // The records' rects are clipped to the pass' device rect: a canvas
+    // reaching past it (another size than the pass was told) culls nothing.
+    const SkIRect clip = canvas->getDeviceClipBounds();
+    if (root->screen.contains(clip)) {
+      visible.setRect(clip);
+      ctx.cull = &visible;
+    }
+  }
   paintNode(doc.root(), canvas, ctx);
   canvas->restore();
   if (counter) counter->restore();
@@ -4608,6 +4631,65 @@ void paintDocument(Document& doc, SkCanvas* canvas, const SkRegion* damage) {
   paintDocumentOver(doc, canvas, damage, nullptr);
 }
 
+namespace {
+
+// Whether the occluder `n` is painted into the backdrop's texture (its own
+// drawing lies on the backdrop's side of the path's end). Unsure: true.
+bool inBackdrop(const Backdrop& bd, const Node* n) {
+  const Node* chain[64];
+  int depth = 0;
+  for (const Node* a = n; a; a = paintParent(a)) {
+    if (depth == 64) return true;
+    chain[depth++] = a;
+  }
+  // chain[depth - 1] is the root; the path starts there too.
+  int at = depth - 1;
+  for (size_t i = 0; i < bd.path.size(); i++, at--) {
+    const Node* p = bd.path[i].first;
+    if (at < 0 || chain[at] != p) return true;
+    if (at == 0) return true;  // a path node: its background is in the texture
+    const Node* child = chain[at - 1];
+    const auto& kids = p->children();
+    uint32_t idx = 0;
+    while (idx < kids.size() && kids[idx] != child) idx++;
+    if (idx == kids.size()) return true;  // not an ordinary child (a ghost, an overlay)
+    if (idx < bd.path[i].second) return true;
+    if (idx > bd.path[i].second) return false;
+    // The child the path ends at or goes on into.
+    if (i + 1 == bd.path.size() || bd.path[i + 1].first != child) return false;
+  }
+  return true;
+}
+
+// Whether an opaque node painted over the backdrop covers all of the
+// device rect `r` (see Occlusion): the backdrop's pixels there end up
+// covered, so its texture need not be drawn (a full-screen pass less under
+// a full-screen panel or a maximized window's texture).
+bool coveredOverBackdrop(Document& doc, const RootRecord* root, SkCanvas* canvas, const SkIRect& r) {
+  if (!root->occ || !occlusionEnabled() || !root->valid || doc.root()->paintTreeDirty() || r.isEmpty()) return false;
+  SkMatrix m = canvas->getTotalMatrix();
+  m.preScale(doc.pixelRatio(), doc.pixelRatio());
+  if (root->inMatrix != m) return false;
+  const SkIRect screen = SkIRect::MakeSize(canvas->getBaseLayerSize());
+  const bool raster = tLayerCache && tLayerCache->impl->raster;
+  for (int i = 0; i < root->occ->n; i++) {
+    const OccCandidate& oc = root->occ->c[i];
+    SkIRect cover;
+    if (!cover.intersect(oc.rect, screen) || !cover.contains(r)) continue;
+    // Drawn from a texture at the nearest whole pixel while it moves: its
+    // rect is not exact (as Occlusion::start).
+    bool inexact = false;
+    for (const Node* a = oc.node; a && raster && !inexact; a = paintParent(a)) {
+      const auto* ar = static_cast<const NodeRecord*>(a->paintCache.get());
+      inexact = ar && ar->rasterOn && ar->moved;
+    }
+    if (!inexact && !inBackdrop(root->backdrop, oc.node)) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
 void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRect>& rects) {
   PaintStats sum;
   sk_sp<SkImage> backdrop = rects.empty() ? nullptr : backdropImage(doc, canvas);
@@ -4615,7 +4697,10 @@ void paintDocumentRects(Document& doc, SkCanvas* canvas, const std::vector<SkIRe
     SkRegion part(r);
     canvas->save();
     canvas->clipIRect(r);
-    if (backdrop) {
+    if (backdrop && coveredOverBackdrop(doc, rootRecord(doc), canvas, r)) {
+      // Every pixel of the rect is painted opaque over the backdrop:
+      // neither its texture nor a clear is needed first.
+    } else if (backdrop) {
       // Every pixel of the rect (transparent outside the backdrop): what
       // clearing it and painting the backdrop gives.
       SkPaint paint;

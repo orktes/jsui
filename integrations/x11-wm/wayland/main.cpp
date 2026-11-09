@@ -591,6 +591,8 @@ struct Client {
   bool gpuFrame = false;      // its texture is a client buffer, geometry margins and all (captureGpu)
   int frameX = 0, frameY = 0;  // where that buffer's surface sits in the root surface (units)
   bool hasTexture = false;
+  bool texOpaque = false;  // its texture covers what is under it (JSUI_TEXTURE_OPAQUE)
+  double frameDoneAt = 0;  // its last frame callbacks (sendFrameDone)
   bool captureQueued = false;  // a subsurface committed: capture once this loop iteration
 
   std::string title, appIdRaw, appId;
@@ -687,6 +689,12 @@ class WM {
 #endif
   wl_event_source* reshowTimer_ = nullptr;  // see touchEvent
   wl_event_source* quietTimer_ = nullptr;
+  // Frame callbacks of clients nobody can see (sendFrameDone).
+  bool throttle_ = true;         // JSUI_WL_THROTTLE=0: every client at the display's rate
+  double stackChangedAt_ = 0;    // the stacking or a window's state last changed
+  wl_event_source* throttleTimer_ = nullptr;
+  bool throttleArmed_ = false;
+  bool throttled(Client* c, double now);
   void fitMaximized(Client* c);
   void saveSettings(const wmjson::Value& v);
   std::string savedSettings_;
@@ -2186,6 +2194,7 @@ bool WM::captureShmDirect(Client* c, int w, int h, int x0, int y0, int x1, int y
   jt.width = w;
   jt.height = h;
   jt.flags = opaque ? JSUI_TEXTURE_OPAQUE : 0;
+  c->texOpaque = opaque;
   std::string key = "win:" + std::to_string(c->id);
   if (jsui_set_texture(rt_, key.c_str(), &jt) == 0) jsui_texture_updated(rt_, key.c_str());
   c->texW = 0;  // c->rgba no longer holds the picture: a composite starts over
@@ -2325,6 +2334,7 @@ bool WM::captureGpu(Client* c) {
   // Toplevels of GPU apps are opaque (Qt's window background; no compositor
   // translucency on Ubuntu Touch): JSUI then culls what they cover.
   t.flags = opaque || !c->popup ? JSUI_TEXTURE_OPAQUE : 0;
+  c->texOpaque = t.flags != 0;
   std::string key = "win:" + std::to_string(c->id);
   if (perfEvery_) {
     const auto& vp = pick.best->current.viewport;
@@ -2507,6 +2517,7 @@ void WM::setupScreenWatch() {
       if (on != w->screenOn_) {
         w->screenOn_ = on;
         if (w->rt_) jsui_post_message(w->rt_, "wm:screen", on ? "{\"on\":true}" : "{\"on\":false}");
+        if (on) w->sendFrameDone();  // the clients held while it was off (throttled)
       }
       wl_event_source_timer_update(w->screenTimer_, 1000);
       return 0;
@@ -2719,6 +2730,7 @@ void WM::onMap(Client* c) {
   if (geo.height > 0) c->h = int(std::lround(geo.height * c->cs));
   fitMaximized(c);
   stack_.push_back(c->id);
+  stackChangedAt_ = nowMs();
   logf("map %u \"%s\" (%s) %dx%d", c->id, c->title.c_str(), c->appIdRaw.c_str(), c->w, c->h);
   capture(c);
   publishWindow(c);
@@ -2736,6 +2748,7 @@ void WM::onUnmap(Client* c) {
     return;
   }
   stack_.erase(std::remove(stack_.begin(), stack_.end(), c->id), stack_.end());
+  stackChangedAt_ = nowMs();
   if (mrId_ == c->id) mrId_ = 0;
   // The shell animates the last frame out, then releases it (wm:release).
   releaseAt_[c->id] = nowMs() + 1500;
@@ -2763,6 +2776,7 @@ void WM::onDestroy(Client* c) {
 void WM::raise(Client* c) {
   auto it = std::find(stack_.begin(), stack_.end(), c->id);
   if (it == stack_.end()) return;
+  stackChangedAt_ = nowMs();
   stack_.erase(it);
   stack_.push_back(c->id);
   // Dialogs stay above their parent, system prompts above everything.
@@ -2815,6 +2829,7 @@ void WM::close(Client* c) {
 void WM::minimize(Client* c) {
   if (c->minimized) return;
   c->minimized = true;
+  stackChangedAt_ = nowMs();
   publishWindow(c);
   if (active_ == c->id) focusTop();
 }
@@ -2822,11 +2837,13 @@ void WM::minimize(Client* c) {
 void WM::unminimize(Client* c) {
   if (!c->minimized) return;
   c->minimized = false;
+  stackChangedAt_ = nowMs();
   publishWindow(c);
 }
 
 void WM::setMaximized(Client* c, bool on) {
   const bool wasSplit = c->snap != 0;
+  stackChangedAt_ = nowMs();
   if (on) {
     if (!c->maximized && !c->snap) {
       c->restore = {c->x, c->y, c->w, c->h};
@@ -4356,8 +4373,46 @@ void WM::armFrameDone() {
   wl_event_source_timer_update(frameDoneTimer_, 100);
 }
 
+// Whether nobody can see the client's frames: the screen is off, it is
+// minimized, or a maximized (or fullscreen) opaque window above it covers
+// it. Its frame callbacks then come once a second (sendFrameDone), so an
+// app that animates in the background (a video, a spinner, a game) stops
+// rendering, importing buffers into the shell and having the shell repaint
+// under the window that covers it, at the display's rate: GPU time the
+// visible app and the shell's own animations get, and battery with the
+// screen off. Not within a second of a change of the stacking (the shell
+// is animating a window in or out, the ones under it show), not for a
+// client still to draw a size it was told, and never before its first
+// frame. A popup follows its toplevel.
+bool WM::throttled(Client* c, double now) {
+  if (!throttle_) return false;
+  Client* top = c;
+  for (int i = 0; top && top->popup && i < 8; i++) top = find(top->parentId);
+  if (!top || top->popup || !top->mapped || !top->hasTexture) return false;
+  if (top->settling || now < top->awaitUntil) return false;
+  if (!screenOn_) return true;
+  if (now - stackChangedAt_ < 1000) return false;
+  if (top->minimized) return true;
+  bool above = false;
+  for (uint32_t id : stack_) {
+    if (id == top->id) {
+      above = true;
+      continue;
+    }
+    if (!above) continue;
+    Client* o = find(id);
+    if (!o || !o->mapped || o->minimized || !o->hasTexture || !o->texOpaque || o->settling || o->fit != 1 ||
+        !(o->maximized || o->fullscreen) || now - o->mappedAt < 1000)
+      continue;
+    if (o->x <= top->x && o->y <= top->y && o->x + o->w >= top->x + top->w && o->y + o->h >= top->y + top->h)
+      return true;
+  }
+  return false;
+}
+
 void WM::sendFrameDone() {
-  if (nowMs() < quietUntil_) return;  // wm:quiet: quietTimer_ sends them
+  const double nowAt = nowMs();
+  if (nowAt < quietUntil_) return;  // wm:quiet: quietTimer_ sends them
   timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   if (frameDoneArmed_) {
@@ -4365,13 +4420,34 @@ void WM::sendFrameDone() {
     wl_event_source_timer_update(frameDoneTimer_, 0);
   }
   // Every surface that asked, shown or not yet (a client may wait for its
-  // first callback before attaching anything), subsurfaces included.
-  for (auto& [id, c] : clients_)
-    if (c->xdg && c->xdg->surface)
-      wlr_surface_for_each_surface(
-          c->xdg->surface,
-          [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
-          &now);
+  // first callback before attaching anything), subsurfaces included; the
+  // ones nobody can see (throttled) once a second.
+  bool held = false;
+  for (auto& [id, c] : clients_) {
+    if (!c->xdg || !c->xdg->surface) continue;
+    if (nowAt - c->frameDoneAt < 1000 && throttled(c, nowAt)) {
+      held = true;
+      continue;
+    }
+    c->frameDoneAt = nowAt;
+    wlr_surface_for_each_surface(
+        c->xdg->surface,
+        [](wlr_surface* s, int, int, void* u) { wlr_surface_send_frame_done(s, static_cast<timespec*>(u)); },
+        &now);
+  }
+  // Nothing else may send the held ones theirs (an idle screen presents
+  // nothing): a timer does.
+  if (held && !throttleArmed_) {
+    if (!throttleTimer_)
+      throttleTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+        auto* w = static_cast<WM*>(u);
+        w->throttleArmed_ = false;
+        w->sendFrameDone();
+        return 0;
+      }, this);
+    throttleArmed_ = true;
+    wl_event_source_timer_update(throttleTimer_, 1000);
+  }
 }
 
 void WM::onFrame() {
@@ -4535,6 +4611,7 @@ bool WM::showMir() {
   std::string err;
   const char* snapEnv = getenv("JSUI_WL_SNAPSHOT_BG");
   snapshotBg_ = !(snapEnv && snapEnv[0] == '0');
+  if (const char* t = getenv("JSUI_WL_THROTTLE")) throttle_ = t[0] != '0';
   const char* perfEnv = getenv("JSUI_WL_PERF");
   perf_ = perfEnv && (perfEnv[0] == '1' || perfEnv[0] == '2');
   perfEvery_ = perf_ && perfEnv[0] == '2';

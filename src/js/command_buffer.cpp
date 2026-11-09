@@ -71,6 +71,10 @@ void CommandBuffer::apply(Runtime& rt) {
     Command cmd = cmds_[next_++];
     applyOne(rt, cmd);
   }
+  if (connectedViews_) {
+    connectedViews_ = false;
+    rt.animated->flush();
+  }
   if (--depth_ == 0) clear();
 }
 
@@ -327,8 +331,13 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       rt.animated->disconnectNodes(tagOf(cmd.a), tagOf(cmd.b));
       return;
     case Op::AnimConnectView:
+      // The view takes its animated value when this batch has been
+      // applied (apply()), not here: a flush for a new connection looks at
+      // every props node, so one per connected view made mounting N
+      // animated views N * N work. Commands that write values flush as
+      // before, and pick the new connections up when they do.
       rt.animated->connectToView(tagOf(cmd.a), cmd.b);
-      rt.animated->flush();
+      connectedViews_ = true;
       return;
     case Op::AnimDisconnectView:
       rt.animated->disconnectFromView(tagOf(cmd.a), cmd.b);
