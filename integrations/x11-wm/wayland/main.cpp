@@ -610,9 +610,7 @@ struct Client {
   // when it was last told its size again (see nudgeStale).
   double staleSince = 0, nudgedAt = -1e9;
   bool deferredCommit = false;  // committed during wm:quiet (onCommit)
-  double holdTexUntil = 0;  // grown: its new frames wait (onCommit)
-  unsigned commits = 0, grownAt = 0;  // commits seen; the one that grew it
-  wl_event_source* holdTimer = nullptr;
+  int confW = 0, confH = 0;  // the size last sent (screen px; setSize)
   WM* wm = nullptr;
   mutable std::string publishedJson;  // what publishWindow last sent (cleared when it is unpublished)
   bool dialog = false;
@@ -690,6 +688,7 @@ class WM {
   std::string savedSettings_;
   void setupScreenWatch();
   Rect snapSlot(int side) const;
+  void relayoutSplit();
   void toSurface(const Client* c, double* x, double* y) const;
   void raise(Client* c);
   void focus(Client* c);
@@ -721,7 +720,8 @@ class WM {
   void keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t timeMs);
   void typeKey(const std::string& key, int mods);
   void sendShellPointer(int phase, double x, double y);
-  void controlLine(const std::string& line);
+  std::string controlLine(const std::string& line);  // the reply line ("ok")
+  std::string windowsJson();
   void writeScreenshot(const std::string& path);
 
   // frames
@@ -762,6 +762,12 @@ class WM {
   bool screenOn_ = true;
   std::string lastSystem_;
   int frameLog_ = 0;  // JSUI_WL_PERF: frames still to log in full (after an unmap)
+  // `record N PATH` (control socket): the next N presented frames, a quarter
+  // size, with their times, written to PATH (state_matrix.py reads it).
+  int recLeft_ = 0;
+  std::string recPath_;
+  std::vector<std::pair<double, std::vector<uint8_t>>> recFrames_;
+  void recordFrame();
   bool tickPending_ = false;
   bool frameScheduled_ = false;
   // Frame callbacks owed: sent with the next output frame, or by this
@@ -889,7 +895,6 @@ class WM {
   bool captureGpu(Client* c);
   void setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish = true);
   static constexpr double kAwaitSizeMs = 600;
-  static constexpr double kGrowHoldMs = 400;
 
   void nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH);
   // Full-screen panels get a blurred snapshot of the screen under them
@@ -1619,6 +1624,8 @@ void WM::place(Client* c) {
 
 void WM::setSize(Client* c, int w, int h) {
   if (perfEvery_) logf("configure %u %dx%d at %.0f", c->id, w, h, nowMs());
+  c->confW = w;
+  c->confH = h;
   wlr_xdg_toplevel_set_size(c->tl, int(std::lround(w / c->cs)), int(std::lround(h / c->cs)));
 }
 
@@ -1629,7 +1636,11 @@ void WM::configure(Client* c, int x, int y, int w, int h) {
   h = std::max({1, h, c->minH});
   c->x = x;
   c->y = y;
-  if (w != c->w || h != c->h) {
+  // Against what it was last told, not what it has drawn: told a size it
+  // hasn't drawn yet, a change back to the size it has (the keyboard up and
+  // down again, a turn and back, before it caught up) was never sent, and it
+  // went on to draw the size in between, short of its room for good.
+  if (w != c->confW || h != c->confH) {
     VLOG("configure %u %dx%d", c->id, w, h);
     setSize(c, w, h);
     c->awaitUntil = nowMs() + kAwaitSizeMs;
@@ -1670,6 +1681,15 @@ void WM::toSurface(const Client* c, double* x, double* y) const {
 void WM::fitMaximized(Client* c) {
   c->fit = 1;
   if (c->popup || (!c->maximized && !c->snap) || c->w <= 0 || c->h <= 0) return;
+  // Fullscreen (it stays maximized underneath): the whole screen is its room.
+  // Fitted to the maximized room instead, a 2000x1200 frame was scaled to
+  // 0.94 under the status bar.
+  if (c->fullscreen) {
+    c->x = std::max(0, (sw_ - c->w) / 2);
+    c->y = std::max(0, (sh_ - c->h) / 2);
+    c->fit = std::min({1.0, double(sw_) / c->w, double(sh_) / c->h});
+    return;
+  }
   Rect wa = c->snap ? snapSlot(c->snap) : maxArea();
   // Told a new size it hasn't drawn yet (the keyboard came or went): its
   // last frame stays 1:1 at the top of its room, under the keyboard or over
@@ -1704,7 +1724,6 @@ void WM::fitMaximized(Client* c) {
 
 void WM::onCommit(Client* c) {
   if (!c->xdg->initialized) return;
-  c->commits++;
   // wm:quiet (the keyboard sliding): a shown window keeps its last frame and
   // size until the slide lands (its new frame, a texture to import and a
   // move for the shell to lay out, cost 14-27 ms frames mid-slide).
@@ -1717,6 +1736,17 @@ void WM::onCommit(Client* c) {
     place(c);
   }
   if (!c->mapped) return;
+  if (!c->popup && c->tl) {
+    // Its minimum size may come after its first commit (Electron sets it
+    // once its page is up): a split's seam stops there (snapSlot).
+    const int mw = std::max(1, int(std::lround(c->tl->current.min_width * c->cs)));
+    const int mh = std::max(1, int(std::lround(c->tl->current.min_height * c->cs)));
+    if (mw != c->minW || mh != c->minH) {
+      c->minW = mw;
+      c->minH = mh;
+      if (c->snap) relayoutSplit();
+    }
+  }
   wlr_box geo;
   wlr_xdg_surface_get_geometry(c->xdg, &geo);
   // Not beyond the surface: Chromium resizing (Claude Desktop) commits its
@@ -1736,13 +1766,14 @@ void WM::onCommit(Client* c) {
     geo.width = std::min(geo.width, ext.x + ext.width - geo.x);
     geo.height = std::min(geo.height, ext.y + ext.height - geo.y);
   }
-  const bool geoMoved = !c->popup && (geo.x != c->geoX || geo.y != c->geoY);
-  c->geoX = geo.x;
-  c->geoY = geo.y;
-  if (geoMoved) publishWindow(c);  // `geo` (where the shell starts drawing its frame)
+  const int geoX = geo.x, geoY = geo.y;
   // The geometry in screen px (the client's units times cs).
   geo.width = int(std::lround(geo.width * c->cs));
   geo.height = int(std::lround(geo.height * c->cs));
+  const bool geoMoved = !c->popup && (geoX != c->geoX || geoY != c->geoY);
+  c->geoX = geoX;
+  c->geoY = geoY;
+  if (geoMoved) publishWindow(c);  // `geo` (where the shell starts drawing its frame)
   if (!c->popup && c->awaitUntil > 0 && nowMs() >= c->awaitUntil && geo.width == c->w && geo.height == c->h) {
     // It kept its size: fitted as such now.
     c->awaitUntil = 0;
@@ -1754,15 +1785,6 @@ void WM::onCommit(Client* c) {
     VLOG("commit %u %dx%d (was %dx%d)", c->id, geo.width, geo.height, c->w, c->h);
     c->w = geo.width;
     c->h = geo.height;
-    // Grown: Chromium's first frame at the new size has its new part
-    // unpainted (black, a band under the app as the keyboard went, until it
-    // drew again). Its last frame stays until a later commit, at most
-    // kGrowHoldMs (the shell carries its bottom row down, see Window.jsx
-    // WinTexture).
-    if (geo.height > c->h + 2 && c->hasTexture && gpuApps_) {
-      c->holdTexUntil = nowMs() + kGrowHoldMs;
-      c->grownAt = c->commits;
-    }
     c->awaitUntil = 0;
     // From the root only when the root carries its frame: Firefox draws into
     // a GPU subsurface over an empty shm root, and the root's buffer as `src`
@@ -2176,21 +2198,6 @@ void WM::setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish) {
 
 bool WM::captureGpu(Client* c) {
 #ifdef JSUI_WL_MIR_GL
-  if (c->holdTexUntil > 0) {
-    const double left = c->holdTexUntil - nowMs();
-    if (left > 0 && c->commits <= c->grownAt + 1) {
-      // Taken again once it lapses (the frame-done backstop, or the next commit).
-      if (!c->holdTimer) c->holdTimer = wl_event_loop_add_timer(loop_, [](void* u) -> int {
-        auto* cl = static_cast<Client*>(u);
-        cl->holdTexUntil = 0;
-        if (cl->wm) cl->wm->capture(cl);
-        return 0;
-      }, c);
-      wl_event_source_timer_update(c->holdTimer, int(left) + 1);
-      return true;
-    }
-    c->holdTexUntil = 0;
-  }
   // The surface whose GPU buffer is the window: the root's, or a subsurface
   // that covers the whole window (Firefox on the GPU draws into a
   // subsurface over an shm root; compositing that on the CPU read nothing of
@@ -2656,6 +2663,7 @@ void WM::onMap(Client* c) {
 
 void WM::onUnmap(Client* c) {
   c->mapped = false;
+  if (c->snap && !c->popup) relayoutSplit();  // the other side's seam no longer stops at its minimum
   if (c->popup) {
     popups_.erase(std::remove(popups_.begin(), popups_.end(), c->id), popups_.end());
     publishPopups();
@@ -2684,7 +2692,6 @@ void WM::onDestroy(Client* c) {
   if (c->mapped) onUnmap(c);
   unhook(c->hooks);
   clients_.erase(c->id);
-  if (c->holdTimer) wl_event_source_remove(c->holdTimer);
   delete c;
 }
 
@@ -2754,6 +2761,7 @@ void WM::unminimize(Client* c) {
 }
 
 void WM::setMaximized(Client* c, bool on) {
+  const bool wasSplit = c->snap != 0;
   if (on) {
     if (!c->maximized && !c->snap) {
       c->restore = {c->x, c->y, c->w, c->h};
@@ -2772,6 +2780,8 @@ void WM::setMaximized(Client* c, bool on) {
   }
   fitMaximized(c);
   publishWindow(c);
+  // Out of the split: the other side's seam no longer stops at its minimum.
+  if (wasSplit) relayoutSplit();
 }
 
 void WM::setSnap(Client* c, int side) {
@@ -2780,6 +2790,7 @@ void WM::setSnap(Client* c, int side) {
     wlr_xdg_toplevel_set_tiled(c->tl, 0);
     if (c->hasRestore) configure(c, c->restore.x, c->restore.y, c->restore.w, c->restore.h);
     publishWindow(c);
+    relayoutSplit();
     return;
   }
   if (!c->maximized && !c->snap) {
@@ -2793,8 +2804,19 @@ void WM::setSnap(Client* c, int side) {
   // left untiled Chromium (Claude Desktop) kept its shadow margins (its
   // frame sat 15 px in from the pane's corner, black strips around it).
   wlr_xdg_toplevel_set_tiled(c->tl, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
-  Rect r = snapSlot(side);
-  configure(c, r.x, r.y, r.w, r.h);
+  relayoutSplit();
+}
+
+// Every split window to its slot: a slot depends on both sides (the seam
+// stops at each one's minimum size, see snapSlot), so one side changing
+// (snapped, its minimum size known only after its first commits, sides
+// swapped) moves the other too. configure() sends only what changed.
+void WM::relayoutSplit() {
+  for (auto& [id, c] : clients_) {
+    if (c->popup || !c->mapped || !c->snap || c->minimized || c->fullscreen) continue;
+    Rect r = snapSlot(c->snap);
+    configure(c, r.x, r.y, r.w, r.h);
+  }
 }
 
 // The left (1) or right (2) half of the work area in split view, with a
@@ -3309,9 +3331,14 @@ void WM::onMessage(const char* name, const char* json) {
     if (v["ratio"].type == wmjson::Value::Number) splitRatio_ = std::clamp(v["ratio"].num(), 0.25, 0.75);
     if (l && l->minimized) unminimize(l);
     if (r && r->minimized) unminimize(r);
+    // Both sides known before either is laid out (swapping, both were
+    // briefly on the same side and snapSlot read the wrong one's minimum).
+    if (l && r) {
+      if (l->snap == 2) l->snap = 1;
+      if (r->snap == 1) r->snap = 2;
+    }
     if (l) setSnap(l, 1);
     if (r) setSnap(r, 2);
-    if (l && r) setSnap(l, 1);  // the seam may have moved for r's minimum size (snapSlot)
     if (l) raise(l);
     if (r) {
       raise(r);
@@ -3927,8 +3954,7 @@ void WM::setupControl() {
       while ((nl = b.find('\n')) != std::string::npos) {
         std::string line = b.substr(0, nl);
         b.erase(0, nl + 1);
-        w->controlLine(line);
-        std::string ok = "ok\n";
+        std::string ok = w->controlLine(line) + "\n";
         (void)!write(c, ok.data(), ok.size());
       }
       return 0;
@@ -3938,11 +3964,11 @@ void WM::setupControl() {
   logf("control socket %s", opt_.control.c_str());
 }
 
-void WM::controlLine(const std::string& line) {
+std::string WM::controlLine(const std::string& line) {
   char cmd[32] = {0};
   double x = 0, y = 0;
   int n = std::sscanf(line.c_str(), "%31s %lf %lf", cmd, &x, &y);
-  if (n < 1) return;
+  if (n < 1) return "ok";
   std::string c = cmd;
   uint32_t t = uint32_t(nowMs());
   if ((c == "down" || c == "move") && n == 3) {
@@ -3975,6 +4001,26 @@ void WM::controlLine(const std::string& line) {
     }
   } else if (c == "shot") {
     writeScreenshot(line.substr(5));
+  } else if (c == "windows") {
+    return windowsJson();
+#ifdef JSUI_WL_MIR_GL
+  } else if (c == "record" && n >= 2) {
+    size_t sp = line.find(' ', 7);
+    recPath_ = sp == std::string::npos ? std::string() : line.substr(sp + 1);
+    recFrames_.clear();
+    recLeft_ = recPath_.empty() ? 0 : std::clamp(int(x), 1, 600);
+#endif
+  } else if (c == "wm") {
+    // wm NAME JSON: a message as from the shell (wm:maximize, wm:split, ...; tests).
+    size_t sp = line.find(' ', 3);
+    std::string name = line.substr(3, sp == std::string::npos ? std::string::npos : sp - 3);
+    onMessage(name.c_str(), sp == std::string::npos ? "{}" : line.c_str() + sp + 1);
+  } else if (c == "post" && rt_) {
+    // post NAME JSON: a message to the shell, as from the host (tests).
+    size_t sp = line.find(' ', 5);
+    std::string name = line.substr(5, sp == std::string::npos ? std::string::npos : sp - 5);
+    jsui_post_message(rt_, name.c_str(), sp == std::string::npos ? "{}" : line.c_str() + sp + 1);
+    scheduleTick(0);
 #ifdef JSUI_WL_MIR
   } else if (c == "rotate" && n >= 2) {
     rotateTo(int(x));
@@ -3990,6 +4036,66 @@ void WM::controlLine(const std::string& line) {
       wlr_seat_touch_notify_frame(seat_);
     }
   }
+  return "ok";
+}
+
+#ifdef JSUI_WL_MIR_GL
+void WM::recordFrame() {
+  std::vector<uint8_t> px;
+  const int w = sw_ / 4, h = sh_ / 4;
+  if (gpu_ && !vulkan_ && mir_->readDesktopScaled(&px, w, h)) {
+    jsui_gpu_reset(gpu_);  // Ganesh's idea of the bound framebuffer is stale
+    recFrames_.emplace_back(nowMs(), std::move(px));
+  }
+  if (--recLeft_ > 0) return;
+  const std::string tmp = recPath_ + ".part";  // whole or not there: readers poll for it
+  if (FILE* f = std::fopen(tmp.c_str(), "wb")) {
+    std::fprintf(f, "JSUIREC %d %d %zu\n", w, h, recFrames_.size());
+    for (auto& [t, p] : recFrames_) {
+      std::fwrite(&t, sizeof t, 1, f);
+      std::fwrite(p.data(), 1, p.size(), f);
+    }
+    std::fclose(f);
+    std::rename(tmp.c_str(), recPath_.c_str());
+  }
+  recFrames_.clear();
+}
+#else
+void WM::recordFrame() { recLeft_ = 0; }
+#endif
+
+// `windows` (control socket): every toplevel's size and frame as jsui-wl
+// sees them, one JSON line, for tests that check each window fills its room
+// (tools: integrations/x11-wm/ubuntu-touch/test/state_matrix.py).
+std::string WM::windowsJson() {
+  auto rect = [](const Rect& r) {
+    return "[" + std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.w) + "," + std::to_string(r.h) + "]";
+  };
+  std::string j = "{\"screen\":[" + std::to_string(sw_) + "," + std::to_string(sh_) + "],\"osk\":" + std::to_string(oskH_) +
+                  ",\"quiet\":" + (nowMs() < quietUntil_ ? "true" : "false") + ",\"max\":" + rect(maxArea()) + ",\"windows\":[";
+  bool first = true;
+  for (auto& [id, c] : clients_) {
+    if (c->popup || !c->tl) continue;
+    wlr_box geo;
+    wlr_xdg_surface_get_geometry(c->xdg, &geo);
+    wlr_surface* s = c->xdg->surface;
+    Rect room = c->fullscreen ? Rect{0, 0, sw_, sh_} : c->snap ? snapSlot(c->snap) : maxArea();
+    j += std::string(first ? "" : ",") + "{\"id\":" + std::to_string(c->id) + ",\"app\":" + wmjson::quoted(c->appId) +
+         ",\"mapped\":" + (c->mapped ? "true" : "false") + ",\"minimized\":" + (c->minimized ? "true" : "false") +
+         ",\"maximized\":" + (c->maximized ? "true" : "false") + ",\"fullscreen\":" + (c->fullscreen ? "true" : "false") +
+         ",\"snap\":" + std::to_string(c->snap) + ",\"dialog\":" + (c->dialog || c->transientFor ? "true" : "false") +
+         ",\"rect\":" + rect({c->x, c->y, c->w, c->h}) + ",\"fit\":" + wmjson::num(c->fit) + ",\"cs\":" + wmjson::num(c->cs) +
+         ",\"room\":" + rect(room) + ",\"conf\":[" + std::to_string(c->confW) + "," + std::to_string(c->confH) + "]" +
+         ",\"geo\":" + rect({geo.x, geo.y, geo.width, geo.height}) + ",\"surface\":[" + std::to_string(s->current.width) + "," +
+         std::to_string(s->current.height) + "],\"min\":[" + std::to_string(c->minW) + "," + std::to_string(c->minH) + "],\"maxsz\":[" +
+         std::to_string(c->maxW) + "," + std::to_string(c->maxH) + "],\"gpu\":" + (c->gpuFrame ? "true" : "false") +
+         ",\"frameAt\":[" + std::to_string(c->frameX) + "," + std::to_string(c->frameY) + "],\"tex\":[" + std::to_string(c->texW) + "," +
+         std::to_string(c->texH) + "],\"src\":[" + std::to_string(c->srcW) + "," + std::to_string(c->srcH) + "],\"crop\":[" +
+         wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," + wmjson::num(c->crop[3]) +
+         "],\"awaiting\":" + (nowMs() < c->awaitUntil ? "true" : "false") + ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
+    first = false;
+  }
+  return j + "]}";
 }
 
 // The screen as PPM: the shell's frame (everything on screen is in it).
@@ -4127,6 +4233,7 @@ void WM::presentMir() {
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
+  if (recLeft_ > 0) recordFrame();
   if (perf_) {
     const double ms = nowMs() - t0;
     perfFrame(0, ms);

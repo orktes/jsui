@@ -691,6 +691,35 @@ class MirHost {
  public:
 
   // The desktop as RGBA rows, top row first (screenshots).
+  // The desktop as it is now, scaled down to dw x dh (GPU blit, then a
+  // small read; for `record`, a few ms a frame), top row first.
+  bool readDesktopScaled(std::vector<uint8_t>* out, int dw, int dh) {
+    if (!gpu_ || !tex_ || !makeCurrent()) return false;
+    using Blit = void (*)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+    static Blit blit = reinterpret_cast<Blit>(eglGetProcAddress("glBlitFramebuffer"));
+    if (!blit) return false;
+    if (!recFb_[0]) {
+      glGenFramebuffers(2, recFb_);
+      glGenRenderbuffers(1, &recRb_);
+    }
+    if (recW_ != dw || recH_ != dh) {
+      glBindRenderbuffer(GL_RENDERBUFFER, recRb_);
+      glRenderbufferStorage(GL_RENDERBUFFER, 0x8058 /* GL_RGBA8 */, dw, dh);
+      recW_ = dw;
+      recH_ = dh;
+    }
+    glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, recFb_[0]);
+    glFramebufferTexture2D(0x8CA8, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_, 0);
+    glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, recFb_[1]);
+    glFramebufferRenderbuffer(0x8CA9, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, recRb_);
+    blit(0, 0, w_, h_, 0, dh, dw, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR);  // flipped: top row first
+    glBindFramebuffer(0x8CA8, recFb_[1]);
+    out->resize(size_t(dw) * size_t(dh) * 4);
+    glReadPixels(0, 0, dw, dh, GL_RGBA, GL_UNSIGNED_BYTE, out->data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+  }
+
   bool readDesktop(std::vector<uint8_t>* out) {
 #ifdef JSUI_WL_MIR_VK
     if (vk_) return vk_->readDesktop(out);
@@ -712,6 +741,8 @@ class MirHost {
 #endif
 
  private:
+  GLuint recFb_[2] = {0, 0}, recRb_ = 0;
+  int recW_ = 0, recH_ = 0;
   static double nowMs() {
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
