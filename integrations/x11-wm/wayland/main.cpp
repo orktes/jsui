@@ -1641,8 +1641,18 @@ void WM::setSize(Client* c, int w, int h) {
 void WM::configure(Client* c, int x, int y, int w, int h) {
   if (c->maxW > 0) w = std::min(w, c->maxW);
   if (c->maxH > 0) h = std::min(h, c->maxH);
-  w = std::max({1, w, c->minW});
-  h = std::max({1, h, c->minH});
+  // A window that fills a room (maximized, split, fullscreen) is told the
+  // room, not raised to its minimum size: Firefox raises its minimum width on
+  // the fly (1579 px, wider than a portrait screen), and told that it drew
+  // it and was shown scaled to 0.76, small in the middle above the keyboard.
+  // It draws the room it is told. (A split's seam still stops at each side's
+  // minimum, snapSlot.)
+  if (!(c->maximized || c->snap || c->fullscreen)) {
+    w = std::max(w, c->minW);
+    h = std::max(h, c->minH);
+  }
+  w = std::max(1, w);
+  h = std::max(1, h);
   c->x = x;
   c->y = y;
   // Against what it was last told, not what it has drawn: told a size it
