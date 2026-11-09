@@ -2,7 +2,7 @@
 // native Ganesh GL, with deterministic simulated time.
 //
 //   jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W]
-//                    [--height H] [--scale S] [--backends cpu,cpu-full,gl,gl-direct]
+//                    [--height H] [--scale S] [--backends cpu,cpu-full,gl,gl-direct,vk,vk-incr]
 //                    [--json out.json] name=bundle.js[@hover] ...
 //
 // Per scenario and backend it loads the bundle, runs --settle-ms of simulated
@@ -17,6 +17,12 @@
 //             are skipped like a host would. "paint" is the CPU time of the
 //             render call (issuing GL), "gpu" adds glFinish().
 //   gl-direct gl with JSUI_GL_NO_RETAIN: the whole frame into the target.
+//   vk        Skia Graphite on Vulkan (jsui_gpu_create_vulkan) into a VkImage
+//             of a device of its own on the first Vulkan ICD (Linux; pick one
+//             with VK_ICD_FILENAMES), whole frames; "gpu" adds
+//             vkQueueWaitIdle().
+//   vk-incr   vk with JSUI_GPU_INCREMENTAL once the image holds the last
+//             frame (damage-only repaints, as the engine hosts do).
 // `@hover` sweeps the mouse over the left part of the screen every frame.
 //
 // Reported per frame: mean / p95 / max paint ms, painted frames, mean pixels
@@ -49,6 +55,14 @@
 #define GL_SILENCE_DEPRECATION 1
 #include <OpenGL/OpenGL.h>
 #endif
+#endif
+
+#if defined(JSUI_VULKAN) && defined(__linux__)
+#define BENCH_VK 1
+#define VK_NO_PROTOTYPES 1
+#include <dlfcn.h>
+
+#include "include/third_party/vulkan/vulkan/vulkan_core.h"
 #endif
 
 #if defined(__APPLE__)
@@ -303,13 +317,18 @@ struct HeadlessGL {
       dpy = getDisplay(nullptr);
       if (!dpy || !initialize(dpy, nullptr, nullptr)) return fail("eglInitialize failed");
     }
-    const int attrs[] = {0x3040, 0x0008, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3033, 0x0001, 0x3038};
+    // Desktop GL, else GLES 3 (Android drivers through libhybris have only that).
     void* cfg = nullptr;
     int n = 0;
-    if (!chooseConfig(dpy, attrs, &cfg, 1, &n) || n < 1) return fail("no EGL config");
-    if (!bindAPI(0x30A2)) return fail("eglBindAPI failed");
-    ctx = createContext(dpy, cfg, nullptr, nullptr);
-    if (!ctx) return fail("eglCreateContext failed");
+    for (bool es : {false, true}) {
+      const int attrs[] = {0x3040, es ? 0x0040 : 0x0008, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3033, 0x0001, 0x3038};
+      const int esCtx[] = {0x3098, 3, 0x3038};
+      if (!chooseConfig(dpy, attrs, &cfg, 1, &n) || n < 1) continue;
+      if (!bindAPI(es ? 0x30A0 : 0x30A2)) continue;
+      ctx = createContext(dpy, cfg, nullptr, es ? esCtx : nullptr);
+      if (ctx) break;
+    }
+    if (!ctx) return fail("no EGL GL / GLES 3 context");
     if (!surfaceless && createPbuffer) {
       const int pb[] = {0x3057, 16, 0x3056, 16, 0x3038};
       surf = createPbuffer(dpy, cfg, pb);
@@ -381,6 +400,172 @@ HeadlessGL* headlessGL(std::string* renderer) {
 
 #endif  // BENCH_GL
 
+#if BENCH_VK
+// A Vulkan 1.1 device of its own with one graphics queue and the RGBA8 image
+// JSUI renders into (as tests/native/vulkan_test.cpp).
+struct Vk {
+  PFN_vkGetInstanceProcAddr gipa = nullptr;
+  PFN_vkGetDeviceProcAddr gdpa = nullptr;
+  VkInstance instance = VK_NULL_HANDLE;
+  VkPhysicalDevice phys = VK_NULL_HANDLE;
+  VkDevice device = VK_NULL_HANDLE;
+  VkQueue queue = VK_NULL_HANDLE;
+  uint32_t family = 0, api = VK_API_VERSION_1_1;
+  std::string name;
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory imageMem = VK_NULL_HANDLE;
+  PFN_vkQueueWaitIdle waitIdle = nullptr;
+  // Every core feature the device has but robust buffer access (as jsui-wl's
+  // Vulkan path), and the extensions Skia uses that it offers.
+  VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+  std::vector<std::string> extNames;
+  std::vector<const char*> exts;
+
+  template <typename F>
+  F ifn(const char* n) {
+    return reinterpret_cast<F>(gipa(instance, n));
+  }
+  template <typename F>
+  F dfn(const char* n) {
+    return reinterpret_cast<F>(gdpa(device, n));
+  }
+
+  // Empty string on success, else why there is no device.
+  std::string init() {
+    void* lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return "no Vulkan loader (libvulkan.so.1)";
+    gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+    if (!gipa) return "no vkGetInstanceProcAddr";
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "jsui-paint-bench";
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &app;
+    if (ifn<PFN_vkCreateInstance>("vkCreateInstance")(&ici, nullptr, &instance) != VK_SUCCESS)
+      return "vkCreateInstance failed (no ICD?)";
+    auto enumerate = ifn<PFN_vkEnumeratePhysicalDevices>("vkEnumeratePhysicalDevices");
+    auto props = ifn<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+    auto queues = ifn<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
+    uint32_t n = 0;
+    enumerate(instance, &n, nullptr);
+    std::vector<VkPhysicalDevice> devs(n);
+    enumerate(instance, &n, devs.data());
+    for (VkPhysicalDevice d : devs) {
+      VkPhysicalDeviceProperties p;
+      props(d, &p);
+      if (p.apiVersion < VK_API_VERSION_1_1) continue;
+      uint32_t qn = 0;
+      queues(d, &qn, nullptr);
+      std::vector<VkQueueFamilyProperties> qs(qn);
+      queues(d, &qn, qs.data());
+      for (uint32_t i = 0; i < qn && !phys; i++)
+        if (qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+          phys = d;
+          family = i;
+          char ver[48];
+          std::snprintf(ver, sizeof ver, " (Vulkan %u.%u, driver 0x%x)", VK_API_VERSION_MAJOR(p.apiVersion),
+                        VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion);
+          name = std::string(p.deviceName) + ver;
+        }
+      if (phys) break;
+    }
+    if (!phys) return "no Vulkan 1.1 device with a graphics queue";
+    ifn<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(phys, &features);
+    features.features.robustBufferAccess = VK_FALSE;
+    auto enumExt = ifn<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
+    uint32_t en = 0;
+    enumExt(phys, nullptr, &en, nullptr);
+    std::vector<VkExtensionProperties> avail(en);
+    enumExt(phys, nullptr, &en, avail.data());
+    static const char* const kWanted[] = {"VK_KHR_driver_properties", "VK_EXT_rasterization_order_attachment_access",
+                                          "VK_ARM_rasterization_order_attachment_access",
+                                          "VK_EXT_blend_operation_advanced", "VK_KHR_dedicated_allocation",
+                                          "VK_KHR_get_memory_requirements2"};
+    std::string all;
+    for (const VkExtensionProperties& e : avail) {
+      all += std::string(all.empty() ? "" : " ") + e.extensionName;
+      if (std::getenv("BENCH_VK_NO_EXTS")) continue;
+      for (const char* w : kWanted)
+        if (std::strcmp(w, e.extensionName) == 0) extNames.push_back(w);
+    }
+    for (const std::string& e : extNames) exts.push_back(e.c_str());
+    if (std::getenv("BENCH_VK_LIST")) std::fprintf(stderr, "vk device extensions: %s\n", all.c_str());
+    float prio = 1;
+    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qci.queueFamilyIndex = family;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext = &features;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    dci.enabledExtensionCount = uint32_t(exts.size());
+    dci.ppEnabledExtensionNames = exts.data();
+    if (ifn<PFN_vkCreateDevice>("vkCreateDevice")(phys, &dci, nullptr, &device) != VK_SUCCESS)
+      return "vkCreateDevice failed";
+    gdpa = ifn<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
+    dfn<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(device, family, 0, &queue);
+    waitIdle = dfn<PFN_vkQueueWaitIdle>("vkQueueWaitIdle");
+    return "";
+  }
+
+  bool makeImage(int w, int h) {
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ii.extent = {uint32_t(w), uint32_t(h), 1};
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (dfn<PFN_vkCreateImage>("vkCreateImage")(device, &ii, nullptr, &image) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr;
+    dfn<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(device, image, &mr);
+    VkPhysicalDeviceMemoryProperties mp;
+    ifn<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(phys, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount && !imageMem; i++)
+      if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = i;
+        if (dfn<PFN_vkAllocateMemory>("vkAllocateMemory")(device, &ai, nullptr, &imageMem) != VK_SUCCESS)
+          imageMem = VK_NULL_HANDLE;
+      }
+    if (!imageMem) return false;
+    return dfn<PFN_vkBindImageMemory>("vkBindImageMemory")(device, image, imageMem, 0) == VK_SUCCESS;
+  }
+
+  JsuiVulkanDevice desc() const {
+    JsuiVulkanDevice d{};
+    d.instance = instance;
+    d.physical_device = phys;
+    d.device = device;
+    d.queue = queue;
+    d.queue_family = family;
+    d.api_version = api;
+    d.get_instance_proc_addr = reinterpret_cast<void*>(gipa);
+    d.device_extensions = exts.data();
+    d.device_extension_count = int(exts.size());
+    d.device_features2 = &features;
+    return d;
+  }
+
+  void destroy() {
+    if (!device) return;
+    waitIdle(queue);
+    if (image) dfn<PFN_vkDestroyImage>("vkDestroyImage")(device, image, nullptr);
+    if (imageMem) dfn<PFN_vkFreeMemory>("vkFreeMemory")(device, imageMem, nullptr);
+    dfn<PFN_vkDestroyDevice>("vkDestroyDevice")(device, nullptr);
+    ifn<PFN_vkDestroyInstance>("vkDestroyInstance")(instance, nullptr);
+    device = VK_NULL_HANDLE;
+    instance = VK_NULL_HANDLE;
+  }
+};
+#endif  // BENCH_VK
+
 // ---------------------------------------------------------------- measuring
 
 struct Sample {
@@ -395,6 +580,7 @@ struct Result {
   std::string scenario, backend;
   int frames = 0, painted = 0;
   double mean = 0, p50 = 0, p95 = 0, max = 0, gpuMean = 0, gpuP95 = 0;
+  double inBudget = 0;  // share of painted frames whose gpu time fits a 60 Hz frame (16.7 ms)
   double pixels = 0;  // mean repainted pixels per frame (all frames)
   double draws = 0, textDraws = 0, imageDraws = 0, saveLayers = 0, clips = 0, nodes = 0;
   double glDraws = 0, glFlushes = 0, glReadPixels = 0, glTexUploads = 0, glTexUploadBytes = 0, glBufferBytes = 0,
@@ -513,6 +699,31 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
   }
 #endif
 
+#if BENCH_VK
+  Vk vk;
+  JsuiGpuContext* vctx = nullptr;
+  int vkLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (backend == "vk" || backend == "vk-incr") {
+    std::string why = vk.init();
+    if (!why.empty() || !vk.makeImage(w, h)) {
+      *error = why.empty() ? "no VkImage" : why;
+      vk.destroy();
+      return out;
+    }
+    vctx = jsui::graphite_gpu::createVulkan(vk.desc());
+    if (!vctx) {
+      *error = "jsui_gpu_create_vulkan failed";
+      vk.destroy();
+      return out;
+    }
+  }
+#else
+  if (backend.rfind("vk", 0) == 0) {
+    *error = "built without JSUI_VULKAN (or not Linux)";
+    return out;
+  }
+#endif
+
   for (int i = 0; i < o.warmup + o.frames; i++) {
     t += 1000.0 / 60;
     if (sc.hover) hoverAt(*rt, i, o);
@@ -561,6 +772,33 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
       }
     }
 #endif
+#if BENCH_VK
+    else if (vctx) {
+      if (rt->needsRedraw()) {
+        JsuiGpuTarget target{};
+        target.texture = reinterpret_cast<void*>(vk.image);
+        target.width = w;
+        target.height = h;
+        target.layout = vkLayout;
+        target.final_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        if (vkLayout != VK_IMAGE_LAYOUT_UNDEFINED && backend == "vk-incr") target.flags = JSUI_GPU_INCREMENTAL;
+        JsuiRect dirty{};
+        auto a = Clock::now();
+        int rc = jsui::graphite_gpu::render(rt->main(), vctx, target, &dirty);
+        auto b = Clock::now();
+        vk.waitIdle(vk.queue);
+        auto c = Clock::now();
+        if (rc != 0) {
+          *error = "Vulkan render failed";
+          break;
+        }
+        vkLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        s.paint = std::chrono::duration<double, std::milli>(b - a).count();
+        s.gpu = std::chrono::duration<double, std::milli>(c - a).count();
+        s.painted = true;
+      }
+    }
+#endif
 #if BENCH_GL
     else if (backend.rfind("gl", 0) == 0) {
       if (rt->needsRedraw()) {
@@ -602,12 +840,20 @@ std::vector<Sample> runPass(const Options& o, const Scenario& sc, const std::str
     }
     if (i >= o.warmup) out.push_back(s);
   }
+  // The runtime first: its cached layers are images of the GPU contexts below.
+  rt.reset();
 #if BENCH_METAL
   if (gctx) jsui::graphite_gpu::destroy(gctx);
   if (mctx) jsui::metal::destroy(mctx);
   bench_mtl_release(mtex);
   bench_mtl_release(mq);
   bench_mtl_release(mdev);
+#endif
+#if BENCH_VK
+  if (vctx) {
+    jsui::graphite_gpu::destroy(vctx);
+    vk.destroy();
+  }
 #endif
 #if BENCH_GL
   if (gpu) {
@@ -667,7 +913,10 @@ Result measure(const Options& o, const Scenario& sc, const std::string& backend)
   r.p50 = pct(paint, 0.5);
   r.p95 = pct(paint, 0.95);
   r.max = pct(paint, 1.0);
-  for (double v : gpuT) r.gpuMean += v / double(gpuT.size());
+  for (double v : gpuT) {
+    r.gpuMean += v / double(gpuT.size());
+    if (v <= 1000.0 / 60) r.inBudget += 1.0 / double(gpuT.size());
+  }
   r.gpuP95 = pct(gpuT, 0.95);
   r.pixels /= n;
   for (double* v : {&r.draws, &r.textDraws, &r.imageDraws, &r.saveLayers, &r.clips, &r.nodes}) *v /= n;
@@ -678,6 +927,7 @@ Result measure(const Options& o, const Scenario& sc, const std::string& backend)
 }
 
 }  // namespace
+
 
 int main(int argc, char** argv) {
   Options o;
@@ -702,7 +952,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-count") o.count = false;
     else if (a == "-h" || a == "--help") {
       std::printf("usage: jsui-paint-bench [--frames N] [--warmup N] [--settle-ms MS] [--width W] [--height H] "
-                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct,graphite,graphite-incr,metal] [--json out.json] name=bundle.js[@hover] ...\n");
+                  "[--scale S] [--backends cpu,cpu-full,gl,gl-direct,vk,vk-incr,graphite,graphite-incr,metal] [--json out.json] name=bundle.js[@hover] ...\n");
       return 0;
     } else {
       Scenario sc;
@@ -727,8 +977,8 @@ int main(int argc, char** argv) {
 #endif
   std::printf("jsui-paint-bench %dx%d @%gx, %d frames (+%d warmup) at 60 Hz%s%s\n", o.width, o.height, o.scale, o.frames,
               o.warmup, glName.empty() ? "" : ", GL: ", glName.c_str());
-  std::printf("%-20s %-8s %7s %7s %7s %7s %7s %10s %7s %6s %6s %6s %7s %7s %6s %6s %6s %7s\n", "scenario", "backend",
-              "paint", "p95", "max", "gpu", "gpuP95", "px/frame", "draws", "text", "image", "layer", "nodes",
+  std::printf("%-20s %-8s %7s %7s %7s %7s %7s %5s %10s %7s %6s %6s %6s %7s %7s %6s %6s %6s %7s\n", "scenario", "backend",
+              "paint", "p95", "max", "gpu", "gpuP95", "<16ms", "px/frame", "draws", "text", "image", "layer", "nodes",
               "glDraw", "fbo", "rdback", "links", "upKB");
   std::vector<Result> results;
   int failures = 0;
@@ -741,15 +991,15 @@ int main(int argc, char** argv) {
         std::printf("%-20s %-8s FAILED: %s\n", r.scenario.c_str(), r.backend.c_str(), r.note.c_str());
         continue;
       }
-      std::printf("%-20s %-8s %7.3f %7.3f %7.3f %7.3f %7.3f %10.0f %7.1f %6.1f %6.1f %6.2f %7.1f %7.1f %6.2f %6.2f %6.2f %7.1f\n",
-                  r.scenario.c_str(), r.backend.c_str(), r.mean, r.p95, r.max, r.gpuMean, r.gpuP95, r.pixels, r.draws,
+      std::printf("%-20s %-8s %7.3f %7.3f %7.3f %7.3f %7.3f %4.0f%% %10.0f %7.1f %6.1f %6.1f %6.2f %7.1f %7.1f %6.2f %6.2f %6.2f %7.1f\n",
+                  r.scenario.c_str(), r.backend.c_str(), r.mean, r.p95, r.max, r.gpuMean, r.gpuP95, 100 * r.inBudget, r.pixels, r.draws,
                   r.textDraws, r.imageDraws, r.saveLayers, r.nodes, r.glDraws, r.glFboBinds, r.glReadPixels, r.glLinks,
                   r.glTexUploadBytes / 1024);
       std::fflush(stdout);
     }
   }
-  std::printf("paint/p95/max: ms per frame of the paint call (all frames; idle ones cost ~0); gpu: with glFinish,\n"
-              "painted frames only; px/frame, draws, text, image, layer, nodes, glDraw, fbo (glBindFramebuffer), rdback (glReadPixels), links\n"
+  std::printf("paint/p95/max: ms per frame of the paint call (all frames; idle ones cost ~0); gpu: with glFinish /\n"
+              "vkQueueWaitIdle, painted frames only; <16ms: painted frames whose gpu time fits 60 Hz; px/frame, draws, text, image, layer, nodes, glDraw, fbo (glBindFramebuffer), rdback (glReadPixels), links\n"
               "(glLinkProgram), upKB (texture uploads): means per frame.\n");
   if (!o.json.empty()) {
     FILE* f = std::fopen(o.json.c_str(), "w");
@@ -760,13 +1010,13 @@ int main(int argc, char** argv) {
         const Result& r = results[i];
         std::fprintf(f,
                      "  {\"scenario\":\"%s\",\"backend\":\"%s\",\"ok\":%s,\"frames\":%d,\"painted\":%d,\"meanMs\":%.4f,"
-                     "\"p50Ms\":%.4f,\"p95Ms\":%.4f,\"maxMs\":%.4f,\"gpuMeanMs\":%.4f,\"gpuP95Ms\":%.4f,\"pixels\":%.0f,"
+                     "\"p50Ms\":%.4f,\"p95Ms\":%.4f,\"maxMs\":%.4f,\"gpuMeanMs\":%.4f,\"gpuP95Ms\":%.4f,\"inBudget\":%.3f,\"pixels\":%.0f,"
                      "\"draws\":%.2f,\"textDraws\":%.2f,\"imageDraws\":%.2f,\"saveLayers\":%.2f,\"clips\":%.2f,"
                      "\"nodes\":%.2f,\"glDraws\":%.2f,\"glFlushes\":%.3f,\"glFinishes\":%.3f,\"glReadPixels\":%.3f,"
                      "\"glTexUploads\":%.3f,\"glTexUploadBytes\":%.0f,\"glBufferBytes\":%.0f,\"glPrograms\":%.2f,"
                      "\"glSyncWaits\":%.3f,\"glLinks\":%.3f,\"glFboBinds\":%.2f}%s\n",
                      r.scenario.c_str(), r.backend.c_str(), r.ok ? "true" : "false", r.frames, r.painted, r.mean, r.p50,
-                     r.p95, r.max, r.gpuMean, r.gpuP95, r.pixels, r.draws, r.textDraws, r.imageDraws, r.saveLayers,
+                     r.p95, r.max, r.gpuMean, r.gpuP95, r.inBudget, r.pixels, r.draws, r.textDraws, r.imageDraws, r.saveLayers,
                      r.clips, r.nodes, r.glDraws, r.glFlushes, r.glFinishes, r.glReadPixels, r.glTexUploads,
                      r.glTexUploadBytes, r.glBufferBytes, r.glPrograms, r.glSyncWaits, r.glLinks, r.glFboBinds,
                      i + 1 < results.size() ? "," : "");

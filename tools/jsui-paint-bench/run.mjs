@@ -9,7 +9,8 @@
 // (static screen, blinking caret), cards (shadowed, rounded-clipped cards
 // scrolling), text (text-heavy panels with a ticking clock, a ticker and
 // a pulsing badge) and menu (jsui-bench's menu: shadowed buttons springing
-// on hover, with a mouse sweep).
+// on hover, with a mouse sweep) and launcher (a tablet shell's app grid
+// fading and scaling in and out over a wallpaper).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -38,6 +39,7 @@ const SCENES = [
   ['cards', 'tools/jsui-paint-bench/scenes/cards.jsx'],
   ['text', 'tools/jsui-paint-bench/scenes/text.jsx'],
   ['menu', 'tools/jsui-bench/scenarios/menu.jsx', '@hover'],
+  ['launcher', 'tools/jsui-paint-bench/scenes/launcher.jsx'],
 ].filter(([name]) => !only || only.split(',').includes(name));
 
 const specs = [];
