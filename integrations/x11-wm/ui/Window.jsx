@@ -456,12 +456,16 @@ export function WinTexture({ win, width, height, fill, pixelRatio = 1 }) {
         </View>
       )}
       <View style={{ position: 'absolute', left: 0, top: 0, width, height: drawnH, overflow: 'hidden' }}>
-        {/* Sized: left to its own size, a buffer wider than the window
-            (Chromium keeps a 2001 x 2304 one through a turn to portrait and
-            shows 1201 x 1930 of it) was fitted to the window's width, the
-            whole buffer shrunk to 60 % with its unused part black. */}
-        <HostTexture name={`win:${win.id}`} scale={pixelRatio}
-          style={tex && tex[0] ? { position: 'absolute', left: -gx, top: -gy, width: tex[0] / pixelRatio, height: tex[1] / pixelRatio } : { position: 'absolute', left: 0, top: 0 }} />
+        {/* At the texture's own size (scale: device px), in a box far bigger
+            than any texture so layout never fits it to the window (fitted to
+            the window's width, a buffer wider than the window was shrunk to
+            60 %, black beside it). Not sized from `tex`: the texture changes
+            when the app commits, `tex` a shell render later, and that one
+            frame scaled the new buffer into the old size (zoomed in as the
+            keyboard came, shifted up over a black band as it went). */}
+        <View style={{ position: 'absolute', left: -gx, top: -gy, width: 8192, height: 8192, alignItems: 'flex-start' }}>
+          <HostTexture name={`win:${win.id}`} scale={pixelRatio} />
+        </View>
       </View>
     </View>
   );
