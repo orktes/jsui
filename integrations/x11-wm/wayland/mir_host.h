@@ -530,6 +530,17 @@ class MirHost {
         blitSubmitted_ = true;
       }
       presentCv_.notify_all();
+      if (tickOnSubmit_) {
+        // The main loop starts the next frame now, while this swap waits for
+        // Mir's vsync, not once it returns: started after it, the frame's
+        // CPU work (~6 ms), its GPU work (~8 ms) and this blit (~3 ms) came to
+        // just over a vsync, and frames slipped to two (the launcher at 49
+        // fps, now 54; the switcher 52, now 56). Its hand-over still waits
+        // for this swap (presentGpu), so no frame queues behind Mir.
+        // JSUI_WL_TICK_ON_SUBMIT=0: after the swap, as before.
+        uint64_t one = 1;
+        (void)!write(swapFd_, &one, sizeof one);
+      }
       if (finish_) glFinish();
       const double t1 = nowMs();
       swap();
@@ -861,6 +872,7 @@ class MirHost {
     }
     if (const char* r = getenv("JSUI_WL_GPU_RED")) debugRed_ = r[0] == '1';
     if (const char* f = getenv("JSUI_WL_GPU_FINISH")) finish_ = f[0] == '1';
+    if (const char* t = getenv("JSUI_WL_TICK_ON_SUBMIT")) tickOnSubmit_ = t[0] != '0';
     if (!buildBlit(why)) {
       destroyGl();
       return false;
@@ -1169,6 +1181,7 @@ class MirHost {
   GlSync renderedFence_ = nullptr;  // a frame for the present thread
   GlSync blitFence_ = nullptr;      // its blit, for the next frame's render to wait on
   bool blitSubmitted_ = true, presentBusy_ = false, stopPresent_ = false;
+  bool tickOnSubmit_ = true;  // JSUI_WL_TICK_ON_SUBMIT (presentLoop)
   std::atomic<double> threadSwapMs_{0};
   std::atomic<double> threadRenderGpuMs_{0}, threadBlitGpuMs_{0};  // JSUI_WL_GPU_FINISH
   GlSync (*glFenceSync_)(GLenum, GLbitfield) = nullptr;
