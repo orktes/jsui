@@ -1,7 +1,9 @@
 [Unit]
 Description=jsui-wm: double-tap to wake (Galaxy Tab A7: Himax always-on tap)
 # Lomiri's settings normally switch this on; without Lomiri nothing does.
-# Installed by install.sh --tap-to-wake (needs sudo).
+# Installed by install.sh --system --tap-to-wake (needs sudo); off by default:
+# the controller once stayed in its screen-off gesture mode (touch dead until a
+# reboot). The session also needs JSUI_WM_TAP_TO_WAKE=1 (jsui-session).
 After=systemd-udev-settle.service lxc-android-config.service
 
 [Service]

@@ -6,8 +6,9 @@
 #   sh install.sh            # unpack to ~/jsui-wm and switch the shell
 #   sh install.sh --now      # ... and restart the session right away
 #   sh install.sh --system   # also the system bits Lomiri normally sets up (sudo):
-#                            # power key via repowerd, double-tap to wake, GPU touch boost,
+#                            # power key via repowerd, GPU touch boost,
 #                            # Wi-Fi on the stock Samsung vendor (wifi-on.sh)
+#   sh install.sh --system --tap-to-wake   # ... and double-tap to wake (Tab A7; off by default)
 #
 # Nothing outside your home directory changes: a systemd user drop-in makes
 # Lomiri's launcher (lomiri-systemd-wrapper) run ~/jsui-wm/jsui-session
@@ -64,16 +65,26 @@ systemctl --user daemon-reload
 systemctl --user stop lomiri-polkit-agent.service 2>/dev/null || true
 echo "jsui-wm installed in $DEST."
 # --system (sudo): what Lomiri normally sets up outside the session. logind
-# must ignore the power key (else a short press powers off), and on the
-# Galaxy Tab A7 the touch controller's double tap to wake gets switched on,
-# and on Adreno GPUs the session may raise the GPU clock while touched.
+# must ignore the power key (else a short press powers off), and on Adreno
+# GPUs the session may raise the GPU clock while touched. --tap-to-wake also
+# switches on the Galaxy Tab A7 touch controller's double tap to wake.
 case " $* " in *" --system "*)
   sudo install -m 644 -D "$DEST/jsui-wm-logind.conf" /etc/systemd/logind.conf.d/jsui-wm.conf &&
     sudo systemctl kill -s HUP systemd-logind && echo "logind: power key handled by repowerd."
+  # Double-tap to wake only with --tap-to-wake (the Tab A7's touch controller
+  # once stayed in its screen-off gesture mode, touch dead until a reboot);
+  # an earlier install's service is switched off.
   if [ -e /sys/class/sec/tsp/cmd ]; then
-    sudo install -m 644 "$DEST/jsui-wm-tap-to-wake.service" /etc/systemd/system/ &&
-      sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-tap-to-wake.service &&
-      echo "double-tap to wake enabled."
+    case " $* " in
+      *" --tap-to-wake "*)
+        sudo install -m 644 "$DEST/jsui-wm-tap-to-wake.service" /etc/systemd/system/ &&
+          sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-tap-to-wake.service &&
+          echo "double-tap to wake enabled (set JSUI_WM_TAP_TO_WAKE=1 for the session too)." ;;
+      *)
+        if systemctl is-enabled jsui-wm-tap-to-wake.service >/dev/null 2>&1; then
+          sudo systemctl disable jsui-wm-tap-to-wake.service && echo "double-tap to wake disabled."
+        fi ;;
+    esac
   fi
   if [ -e /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ]; then
     sudo install -m 644 "$DEST/jsui-wm-gpu-boost.service" /etc/systemd/system/ &&
