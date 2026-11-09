@@ -691,6 +691,7 @@ class WM {
   wl_event_source* quietTimer_ = nullptr;
   // Frame callbacks of clients nobody can see (sendFrameDone).
   bool throttle_ = true;         // JSUI_WL_THROTTLE=0: every client at the display's rate
+  bool overview_ = false;        // wm:overview: the shell shows every window (the switcher)
   double stackChangedAt_ = 0;    // the stacking or a window's state last changed
   wl_event_source* throttleTimer_ = nullptr;
   bool throttleArmed_ = false;
@@ -3456,6 +3457,16 @@ void WM::onMessage(const char* name, const char* json) {
   } else if (n == "wm:snapshot") {
     snapshotBackdrop(v["on"].truthy());
 
+  } else if (n == "wm:overview") {
+    // The switcher shows the windows a maximized one covers: none is
+    // throttled while it is up (or for a second after, as it closes).
+    const bool on = v["on"].truthy();
+    if (on != overview_) {
+      overview_ = on;
+      stackChangedAt_ = nowMs();
+      if (on) sendFrameDone();
+    }
+
   } else if (n == "wm:osk") {
     int h = P(v["height"].num());
     if (perfEvery_) logf("osk %d at %.0f", h, nowMs());
@@ -4381,9 +4392,10 @@ void WM::armFrameDone() {
 // under the window that covers it, at the display's rate: GPU time the
 // visible app and the shell's own animations get, and battery with the
 // screen off. Not within a second of a change of the stacking (the shell
-// is animating a window in or out, the ones under it show), not for a
-// client still to draw a size it was told, and never before its first
-// frame. A popup follows its toplevel.
+// is animating a window in or out, the ones under it show) or while the
+// switcher shows them all (wm:overview), not for a client still to draw a
+// size it was told, and never before its first frame. A popup follows its
+// toplevel.
 bool WM::throttled(Client* c, double now) {
   if (!throttle_) return false;
   Client* top = c;
@@ -4391,7 +4403,7 @@ bool WM::throttled(Client* c, double now) {
   if (!top || top->popup || !top->mapped || !top->hasTexture) return false;
   if (top->settling || now < top->awaitUntil) return false;
   if (!screenOn_) return true;
-  if (now - stackChangedAt_ < 1000) return false;
+  if (overview_ || now - stackChangedAt_ < 1000) return false;
   if (top->minimized) return true;
   bool above = false;
   for (uint32_t id : stack_) {

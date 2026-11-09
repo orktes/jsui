@@ -26,6 +26,9 @@ export const wm = {
   textInputClosed: () => send('wm:textInputClosed'),
   // A blurred copy of the screen as host texture "wm:backdrop" (on: false drops it).
   snapshot: (on) => send('wm:snapshot', { on }),
+  // The switcher is up: it shows windows a maximized one covers, so the host
+  // keeps them drawing (jsui-wl throttles windows nobody can see).
+  overview: (on) => send('wm:overview', { on }),
   // A short buzz (hosts with a vibrator: hfd on Ubuntu Touch).
   haptic: (ms = 12) => send('wm:haptic', { ms }),
   // A notification (wm:notification's id) was tapped: its default action.
