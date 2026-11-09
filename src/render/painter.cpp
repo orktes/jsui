@@ -196,7 +196,16 @@ constexpr float kMotionMinRatio = 0.5f, kMotionMaxRatio = 1.001f;
 
 // Motion draws resample with Catmull-Rom: a texture scaled by a ratio near
 // 1 keeps more of its glyph edges' contrast than with bilinear filtering.
-SkSamplingOptions motionSampling() { return SkSamplingOptions(SkCubicResampler::CatmullRom()); }
+// JSUI_MOTION_SAMPLING=linear: bilinear instead (one texture tap a pixel,
+// not sixteen; a fill-rate-bound mobile GPU drew a scaling full-screen layer
+// in 19 ms with Catmull-Rom on Adreno 610 GL, 69 ms on its Vulkan driver).
+SkSamplingOptions motionSampling() {
+  static const bool linear = [] {
+    const char* v = std::getenv("JSUI_MOTION_SAMPLING");
+    return v && std::strcmp(v, "linear") == 0;
+  }();
+  return linear ? SkSamplingOptions(SkFilterMode::kLinear) : SkSamplingOptions(SkCubicResampler::CatmullRom());
+}
 
 // The factor to render a motion texture at, over the current device scale
 // `cur` (the larger of the matrix's scales), for a node whose layout rests
