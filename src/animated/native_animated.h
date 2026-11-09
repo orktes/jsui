@@ -140,6 +140,12 @@ class NativeAnimated {
   // Writes props of nodes whose inputs changed (or whose view was re-propped
   // by React) into the views.
   void flush();
+  // Writes only the views connected since the last flush (connectToView):
+  // what a batch that connected views needs at once, without flush()'s
+  // look at every props node (React applies a batch per created node, so a
+  // flush per batch made mounting N animated views N * N). tick()'s flush
+  // does the rest before the frame is laid out and painted.
+  void flushViews();
 
   struct EndEvent {
     int id;
@@ -338,6 +344,7 @@ class NativeAnimated {
   // or a props node was connected.
   uint64_t propsEpoch_ = 0;
   bool recheckViews_ = true;
+  std::vector<int> newViews_;  // props nodes connected since the last flush (flushViews)
   std::vector<Anim> animations_;
   std::vector<Mapping> mappings_;
   std::unordered_set<int> listening_;

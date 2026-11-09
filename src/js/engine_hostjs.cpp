@@ -749,7 +749,7 @@ EMSCRIPTEN_KEEPALIVE void jsui_hjs_a_link(int e, int op, int a, double b) {
     case 1: na.disconnectNodes(a, int(b)); break;
     case 2:
       na.connectToView(a, uint32_t(b));
-      na.flush();
+      na.flushViews();  // not flush(): see CommandBuffer::apply
       break;
     case 3: na.disconnectFromView(a, uint32_t(b)); break;
   }
