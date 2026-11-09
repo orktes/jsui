@@ -1054,6 +1054,9 @@ function Shell() {
   const onWinMenu = useCallback((win) => setWinMenu(win.id), []);
   const closeWinMenu = useCallback(() => setWinMenu(null), []);
   const overviewUp = panel === 'overview' || closingPanel === 'overview';
+  useEffect(() => {
+    wm.overview(overviewUp);
+  }, [overviewUp]);
   // The status bar names a full-screen app (tablet mode: it has no header of
   // its own) and holds its menu; while an app starts, the one starting.
   const starting = appMode && front.length ? front[front.length - 1].app : null;

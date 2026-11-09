@@ -226,6 +226,11 @@ gives it.
   it back to the lowest clock 500 ms later, the touch boost Android's power
   HAL would give (the governor alone keeps the Tab A7 at 320-600 MHz through
   an animation).
+* Apps nobody can see get their frame callbacks once a second, not at the
+  display's rate: with the screen off, minimized, or covered by a maximized
+  or fullscreen opaque window for more than a second (`JSUI_WL_THROTTLE=0`
+  turns it off). A background video or game then stops rendering, and the
+  shell stops importing and repainting for it.
 * `ubuntu-touch/test/` runs `--mir` without a tablet: `mir-test-server` is a
   Mir 1.8 server on Mir's stub graphics and input platforms with a fake
   touchscreen, and `test-mir.sh` checks that a Mir touch opens the launcher

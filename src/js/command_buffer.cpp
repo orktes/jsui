@@ -71,6 +71,10 @@ void CommandBuffer::apply(Runtime& rt) {
     Command cmd = cmds_[next_++];
     applyOne(rt, cmd);
   }
+  if (connectedViews_) {
+    connectedViews_ = false;
+    rt.animated->flushViews();
+  }
   if (--depth_ == 0) clear();
 }
 
@@ -327,8 +331,13 @@ void CommandBuffer::applyOne(Runtime& rt, const Command& cmd) {
       rt.animated->disconnectNodes(tagOf(cmd.a), tagOf(cmd.b));
       return;
     case Op::AnimConnectView:
+      // The view takes its animated value when this batch has been
+      // applied (apply(): flushViews, the new connections only), not here:
+      // a flush looks at every props node, and React applies a batch per
+      // created node, so a flush per connected view (or per batch) made
+      // mounting N animated views N * N work.
       rt.animated->connectToView(tagOf(cmd.a), cmd.b);
-      rt.animated->flush();
+      connectedViews_ = true;
       return;
     case Op::AnimDisconnectView:
       rt.animated->disconnectFromView(tagOf(cmd.a), cmd.b);

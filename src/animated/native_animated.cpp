@@ -180,6 +180,7 @@ void NativeAnimated::connectToView(int propsTag, uint32_t viewId) {
   p->view = viewId;
   p->viewWritten = false;  // written at the next flush
   recheckViews_ = true;
+  newViews_.push_back(propsTag);
 }
 
 void NativeAnimated::disconnectFromView(int propsTag, uint32_t viewId) {
@@ -586,7 +587,18 @@ void NativeAnimated::applyProps(ANode& p) {
   p.viewWritten = true;
 }
 
+void NativeAnimated::flushViews() {
+  if (newViews_.empty()) return;
+  gen_++;
+  for (int tag : newViews_) {
+    ANode* n = node(tag);
+    if (n && n->type == Type::Props && n->view && !n->viewWritten) applyProps(*n);
+  }
+  newViews_.clear();
+}
+
 void NativeAnimated::flush() {
+  newViews_.clear();  // looked at below (recheckViews_)
   if (nodes_.empty()) return;
   gen_++;
   uint64_t visit = ++visitGen_;

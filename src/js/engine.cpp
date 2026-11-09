@@ -882,8 +882,16 @@ bool QuickJsEngine::eval(const std::string& source, const std::string& name) {
       r = JS_ThrowSyntaxError(impl.ctx, "%s: truncated precompiled bundle", name.c_str());
     } else if (parts.key == bytecodeKey() && !parts.bytecode.empty()) {
       // JS_ReadObject checks the bytecode's own version and checksum too.
+      // Lazy: a function's body (constants, code, its atoms) is read from
+      // the engine's own copy of the bytecode at its first call, so the
+      // load does not pay for the parts of React and the app that never
+      // run. JSUI_JS_LAZY=0 reads everything up front.
+      static const bool lazy = [] {
+        const char* e = std::getenv("JSUI_JS_LAZY");
+        return !(e && e[0] == '0');
+      }();
       JSValue fn = JS_ReadObject(impl.ctx, reinterpret_cast<const uint8_t*>(parts.bytecode.data()),
-                                 parts.bytecode.size(), JS_READ_OBJ_BYTECODE);
+                                 parts.bytecode.size(), JS_READ_OBJ_BYTECODE | (lazy ? JS_READ_OBJ_LAZY : 0));
       if (JS_IsException(fn) && !parts.source.empty()) {
         JS_FreeValue(impl.ctx, JS_GetException(impl.ctx));
         impl.rt.jsLog(JSUI_LOG_WARN, name + ": unreadable bytecode, running the bundle's source instead");

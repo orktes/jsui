@@ -275,6 +275,7 @@ class CommandBuffer {
   size_t open_ = 0;  // payloads being written (nesting level)
   size_t next_ = 0;  // the next command to apply
   int depth_ = 0;    // nested apply() calls
+  bool connectedViews_ = false;  // AnimConnectView applied: flush the animated graph after the batch
   Result result_;
 };
 
