@@ -611,6 +611,10 @@ struct Client {
   double staleSince = 0, nudgedAt = -1e9;
   bool deferredCommit = false;  // committed during wm:quiet (onCommit)
   int confW = 0, confH = 0;  // the size last sent (screen px; setSize)
+  // After a turn of the screen, until it has drawn its new size (noteFrame):
+  // the shell hides its frame meanwhile.
+  bool settling = false;
+  int settleFrames = 0;
   WM* wm = nullptr;
   mutable std::string publishedJson;  // what publishWindow last sent (cleared when it is unpublished)
   bool dialog = false;
@@ -722,6 +726,9 @@ class WM {
   void sendShellPointer(int phase, double x, double y);
   std::string controlLine(const std::string& line);  // the reply line ("ok")
   std::string windowsJson();
+  void noteFrame(Client* c, bool gpu);
+  void beginSettle(bool splitOnly);
+  wl_event_source* settleTimer_ = nullptr;
   void writeScreenshot(const std::string& path);
 
   // frames
@@ -888,6 +895,7 @@ class WM {
   std::map<uint32_t, wlr_buffer*> gpuBuffers_;
   bool captureGpu(Client* c);
   void setCrop(Client* c, wlr_surface* s, int bufW, int bufH, bool publish = true);
+  static constexpr double kSettleMs = 600;  // a window's longest wait to be shown again after a turn (rotateTo)
   static constexpr double kAwaitSizeMs = 600;
 
   void nudgeStale(Client* c, wlr_surface* s, int bufW, int bufH);
@@ -1621,6 +1629,7 @@ void WM::setSize(Client* c, int w, int h) {
   if (perfEvery_) logf("configure %u %dx%d at %.0f", c->id, w, h, nowMs());
   c->confW = w;
   c->confH = h;
+  c->settleFrames = 0;  // settling: frames of this size count
   wlr_xdg_toplevel_set_size(c->tl, int(std::lround(w / c->cs)), int(std::lround(h / c->cs)));
 }
 
@@ -1929,7 +1938,10 @@ void WM::capture(Client* c) {
     partial = true;
   }
 #endif
-  if (captureShmDirect(c, w, h, bx0, by0, bx1, by1, partial)) return;
+  if (captureShmDirect(c, w, h, bx0, by0, bx1, by1, partial)) {
+    noteFrame(c, false);
+    return;
+  }
   // c->rgba holds the last composite only if that was the last capture.
   if (c->texW != w || c->texH != h) {
     partial = false;
@@ -1999,7 +2011,49 @@ void WM::capture(Client* c) {
     if (c->popup) publishPopups();
     else publishWindow(c);
   }
+  noteFrame(c, false);
   scheduleTick(0);
+}
+
+// The shown windows (or only the split ones) are hidden by the shell until
+// each has drawn the size it is about to be told (noteFrame), at most
+// kSettleMs after the last call: a turn of the screen, a split entered or
+// its divider dragged. GPU apps' first frames at a new size aren't finished
+// (Firefox: its old layout in a corner, black beside it), and a divider
+// dragged resizes them every 50 ms.
+void WM::beginSettle(bool splitOnly) {
+  for (auto& [id, c] : clients_)
+    if (!c->popup && c->mapped && !c->minimized && c->hasTexture && (!splitOnly || c->snap)) {
+      if (!c->settling) {
+        c->settling = true;
+        publishWindow(c);
+      }
+      c->settleFrames = 0;
+    }
+  if (!settleTimer_)
+    settleTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
+      auto* wm = static_cast<WM*>(u);
+      for (auto& [id, c] : wm->clients_)
+        if (c->settling) {
+          c->settling = false;
+          wm->publishWindow(c);
+        }
+      return 0;
+    }, this);
+  wl_event_source_timer_update(settleTimer_, int(kSettleMs));
+}
+
+// A frame of `c` is in its texture: while it settles after a turn of the
+// screen (rotateTo), frames at its new size count; GPU apps need two (their
+// first at a new size isn't finished: Firefox's has its old layout in a
+// corner and black beside it), others one.
+void WM::noteFrame(Client* c, bool gpu) {
+  if (!c->settling) return;
+  if (std::abs(c->w - c->confW) > 2 || std::abs(c->h - c->confH) > 2) return;
+  if (++c->settleFrames >= (gpu ? 2 : 1)) {
+    c->settling = false;
+    publishWindow(c);
+  }
 }
 
 // A window drawn on the GPU (android_wlegl, or a dma-buf from Vulkan apps:
@@ -2289,6 +2343,7 @@ bool WM::captureGpu(Client* c) {
     if (c->popup) publishPopups();
     else publishWindow(c);
   }
+  noteFrame(c, true);
   scheduleTick(0);
   return true;
 #else
@@ -3316,6 +3371,7 @@ void WM::onMessage(const char* name, const char* json) {
     raise(c);
     focus(c);
   } else if (n == "wm:maximize" && c) {
+    if (c->snap) beginSettle(true);  // out of the split: both windows resize
     setMaximized(c, v["on"].type == wmjson::Value::Null ? !c->maximized : v["on"].truthy());
   } else if (n == "wm:snap" && c) {
     const std::string& side = v["side"].str();
@@ -3334,6 +3390,7 @@ void WM::onMessage(const char* name, const char* json) {
     }
     if (l) setSnap(l, 1);
     if (r) setSnap(r, 2);
+    beginSettle(true);
     if (l) raise(l);
     if (r) {
       raise(r);
@@ -3341,6 +3398,7 @@ void WM::onMessage(const char* name, const char* json) {
     }
   } else if (n == "wm:splitRatio") {
     splitRatio_ = std::clamp(v["ratio"].num(0.5), 0.25, 0.75);
+    beginSettle(true);
     for (auto& [id, cl] : clients_)
       if (!cl->popup && cl->mapped && cl->snap && !cl->minimized) setSnap(cl, cl->snap);
   } else if (n == "wm:fullscreen" && c) {
@@ -3434,7 +3492,7 @@ std::string WM::windowJson(const Client* c) const {
                   (c->snap == 1 ? "left" : c->snap == 2 ? "right" : "") +
                   "\"" + slot + ",\"icon\":false,\"ready\":" + (c->hasTexture ? "true" : "false") +
                   ",\"pid\":" + std::to_string(c->pid) + ",\"mappedAt\":" + wmjson::num(c->mappedAt) +
-                  ",\"fit\":" + wmjson::num(c->fit) + ",\"tex\":[" + std::to_string(c->texW) + "," + std::to_string(c->texH) + "]" +
+                  ",\"settling\":" + (c->settling ? "true" : "false") + ",\"fit\":" + wmjson::num(c->fit) + ",\"tex\":[" + std::to_string(c->texW) + "," + std::to_string(c->texH) + "]" +
                   ",\"src\":[" + std::to_string(c->srcW) + "," + std::to_string(c->srcH) + "]" +
                   // Where its geometry starts in its frame (px): a client-side
                   // shadow's margin the shell skips when it draws the frame 1:1.
@@ -4087,7 +4145,7 @@ std::string WM::windowsJson() {
          ",\"frameAt\":[" + std::to_string(c->frameX) + "," + std::to_string(c->frameY) + "],\"tex\":[" + std::to_string(c->texW) + "," +
          std::to_string(c->texH) + "],\"src\":[" + std::to_string(c->srcW) + "," + std::to_string(c->srcH) + "],\"crop\":[" +
          wmjson::num(c->crop[0]) + "," + wmjson::num(c->crop[1]) + "," + wmjson::num(c->crop[2]) + "," + wmjson::num(c->crop[3]) +
-         "],\"awaiting\":" + (nowMs() < c->awaitUntil ? "true" : "false") + ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
+         "],\"awaiting\":" + (nowMs() < c->awaitUntil ? "true" : "false") + ",\"settling\":" + (c->settling ? "true" : "false") + ",\"ready\":" + (c->hasTexture ? "true" : "false") + "}";
     first = false;
   }
   return j + "]}";
@@ -4603,6 +4661,8 @@ void WM::rotateTo(int deg) {
     wlr_output_state_set_custom_mode(&st, w, h, 60000);
     wlr_output_commit_state(output_, &st);
     wlr_output_state_finish(&st);
+    // Every shown window settles at its new size before the shell shows it again.
+    beginSettle(false);
     resizeScreen(w, h);
   }
   shellDirty_ = true;
