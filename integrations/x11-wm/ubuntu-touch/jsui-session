@@ -70,6 +70,13 @@ fi
 export HYBRIS_LD_LIBRARY_PATH="${HYBRIS_LD_LIBRARY_PATH:-/system/lib64:/odm/lib64:/vendor/lib64:/vendor/lib64/hw}"
 export HYBRIS_VULKANPLATFORM="${HYBRIS_VULKANPLATFORM:-null}"
 SCALE=${JSUI_WM_SCALE:-1.75}
+# Ubuntu Touch's own apps (Qt / Lomiri components) at the shell's scale: a grid
+# unit of 8 px times it (14 at 1.75). The device default (GRID_UNIT_PX=22 for
+# the Tab A7, /etc/ubuntu-touch-session.d) drew them a third larger than the
+# shell and Firefox, and their minimum sizes (Gallery 1320 px tall) didn't fit
+# a split pane: shown scaled down, small. JSUI_WM_APP_GRID_UNIT overrides it.
+APP_GU=${JSUI_WM_APP_GRID_UNIT:-$(awk -v s="$SCALE" 'BEGIN { printf "%d", 8 * s + 0.5 }')}
+set -- "$@" --app-env GRID_UNIT_PX="$APP_GU"
 # The Tab A7 panel is portrait (1200x2000); 90 shows the desktop in landscape.
 ROTATE=${JSUI_WM_ROTATE:-90}
 "$DIR/jsui-wl" --mir --rotate "$ROTATE" --scale "$SCALE" --bundle "$DIR/shell.js" --control "${XDG_RUNTIME_DIR:-/tmp}/jsui-wl.ctl" \
