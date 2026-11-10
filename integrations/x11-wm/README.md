@@ -225,7 +225,11 @@ gives it.
   frames it set off are drawn (up to 2 s after the touch) (`JSUI_WL_GPU_BOOST`, MHz, default 950, 0 off) and sets
   it back to the lowest clock 500 ms later, the touch boost Android's power
   HAL would give (the governor alone keeps the Tab A7 at 320-600 MHz through
-  an animation).
+  an animation). Keys, the keyboard coming up, and frames the focused app
+  commits up to 30 s after the last touch or key (`JSUI_WL_BOOST_APP_MS`, 0 off) boost too: typing and the answer
+  streaming in. The service also opens the CPU policies' `scaling_min_freq`,
+  raised with it to `JSUI_WL_CPU_BOOST` MHz (default 1400, 0 off; the Tab
+  A7's little cores otherwise sat at 614 MHz while typing).
 * Apps nobody can see get their frame callbacks once a second, not at the
   display's rate: with the screen off, minimized, or covered by a maximized
   or fullscreen opaque window for more than a second (`JSUI_WL_THROTTLE=0`

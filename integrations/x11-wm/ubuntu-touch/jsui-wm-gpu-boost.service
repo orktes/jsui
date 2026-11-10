@@ -1,16 +1,18 @@
 [Unit]
-Description=jsui-wm: let the session raise the GPU's minimum clock (touch boost)
+Description=jsui-wm: let the session raise the GPU's and CPUs' minimum clocks (touch boost)
 # Android's power HAL raises the GPU clock on touch; without Lomiri and that
 # HAL the Adreno governor ramps up too slowly for the shell's animations.
-# This only makes kgsl's devfreq min_freq writable by the video group (the
-# session user is in it); jsui-wl raises it while touched or drawing and
-# sets it back after (JSUI_WL_GPU_BOOST). Installed by install.sh --system.
+# This only makes kgsl's devfreq min_freq and the cpufreq policies'
+# scaling_min_freq writable by the video group (the session user is in it);
+# jsui-wl raises them while touched, typing or drawing the answer and sets
+# them back after (JSUI_WL_GPU_BOOST, JSUI_WL_CPU_BOOST). Installed by
+# install.sh --system.
 After=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'f=/sys/class/kgsl/kgsl-3d0/devfreq/min_freq; [ -e $f ] || exit 0; chgrp video $f && chmod g+w $f'
+ExecStart=/bin/sh -c 'for f in /sys/class/kgsl/kgsl-3d0/devfreq/min_freq /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq; do [ -e $f ] && chgrp video $f && chmod g+w $f; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target

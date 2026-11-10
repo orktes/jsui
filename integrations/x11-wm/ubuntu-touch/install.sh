@@ -88,8 +88,9 @@ case " $* " in *" --system "*)
   fi
   if [ -e /sys/class/kgsl/kgsl-3d0/devfreq/min_freq ]; then
     sudo install -m 644 "$DEST/jsui-wm-gpu-boost.service" /etc/systemd/system/ &&
-      sudo systemctl daemon-reload && sudo systemctl enable --now jsui-wm-gpu-boost.service &&
-      echo "GPU touch boost enabled (applies when the session next starts)."
+      sudo systemctl daemon-reload && sudo systemctl enable jsui-wm-gpu-boost.service &&
+      sudo systemctl restart jsui-wm-gpu-boost.service &&  # restart: an older copy only opened the GPU node
+      echo "GPU/CPU touch boost enabled (applies when the session next starts)."
   fi
   # adb: a restarted adbd gets its USB gadget re-attached (adbd-rebind.conf).
   if systemctl cat adbd.service >/dev/null 2>&1 && [ -d /sys/kernel/config/usb_gadget ]; then

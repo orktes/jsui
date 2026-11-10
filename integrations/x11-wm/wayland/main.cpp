@@ -953,14 +953,29 @@ class WM {
   // 41 fps with 15. Needs min_freq writable by the session (install.sh --system:
   // jsui-wm-gpu-boost.service); without that, or without the node, nothing
   // happens.
-  std::string boostPath_;
-  long boostHz_ = 0, boostRestHz_ = 0;
+  // Typing and an app answering it (a chat reply streaming in, a page
+  // loading after Enter) set off no touches, so the clocks stayed at their
+  // lowest through them (Claude Desktop: GPU 320-465 MHz, little cores at
+  // 614 MHz): a key, the keyboard coming up, and frames the focused app
+  // commits up to JSUI_WL_BOOST_APP_MS (default 30000, 0: off) after the
+  // last touch or key boost too, held 500 ms past the last commit. Past that
+  // an app redrawing on its own (a video, a clock, a caret blinking in a
+  // focused field) gets the governor's clocks again.
+  // The same boost raises the CPU policies' scaling_min_freq to
+  // JSUI_WL_CPU_BOOST MHz (default 1400; 0: off) where the session may write
+  // it (jsui-wm-gpu-boost.service), and puts back what it found after.
+  struct BoostNode {
+    std::string path;
+    long boostHz = 0, restHz = 0;
+  };
+  std::vector<BoostNode> boostNodes_;
   bool boosted_ = false;
-  double boostUntil_ = 0, boostTouch_ = 0;
+  double boostUntil_ = 0, boostTouch_ = 0, boostInput_ = -1e12, boostAppMs_ = 30000;
   wl_event_source* boostTimer_ = nullptr;
+  enum class Boost { Touch, Frame, Input, App };
   void setupGpuBoost();
-  void gpuBoost(bool touch);
-  void gpuBoostWrite(long hz);
+  void gpuBoost(Boost why);
+  void gpuBoostWrite(bool on);
   void removeWindowTexture(uint32_t id);
   bool renderGpu();
   double lastTickMs_ = 0, lastRenderMs_ = 0;  // the last tick's / paint's time (slow-frame log)
@@ -1110,6 +1125,12 @@ bool WM::setup() {
       g.buf = wlr_buffer_lock(nb);
     }));
 #endif
+    hooks->push_back(hook(&s->events.client_commit, [this, s](void*) {
+      // Frames of the focused app may hold the boost (gpuBoost, Boost::App).
+      if (!boostTimer_ || !screenOn_ || !(s->pending.committed & WLR_SURFACE_STATE_BUFFER)) return;
+      Client* a = find(active_);
+      if (a && a->xdg && a->xdg->surface == wlr_surface_get_root_surface(s)) gpuBoost(Boost::App);
+    }));
     hooks->push_back(hook(&s->events.destroy, [this, hooks, s](void*) {
       forgetGpuBuf(s);
       // unhook() deletes this very lambda: nothing captured is touched after it.
@@ -1216,6 +1237,7 @@ bool WM::setup() {
   wlr_seat_set_capabilities(seat_, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
   auto onPanel = [this](bool show) {
     if (perfEvery_) logf("text input %s at %.0f", show ? "on" : "off", nowMs());
+    if (show) gpuBoost(Boost::Input);
     jsui_post_message(rt_, "wm:textInput", show ? "{\"show\":true}" : "{\"show\":false}");
     scheduleTick(0);
   };
@@ -3766,20 +3788,50 @@ void WM::pointerButton(bool down, uint32_t button, uint32_t timeMs) {
   }
 }
 
-// Set back to the rest frequency when killed (jsui-session's restart sends
+// Set back to the rest frequencies when killed (jsui-session's restart sends
 // SIGTERM): only async-signal-safe calls, on what setupGpuBoost prepared.
-char g_boostPath[128];
-char g_boostRest[24];
+constexpr int kBoostSignalNodes = 4;
+char g_boostPath[kBoostSignalNodes][128];
+char g_boostRest[kBoostSignalNodes][24];
 void gpuBoostSignal(int sig) {
-  int fd = open(g_boostPath, O_WRONLY);
-  if (fd >= 0) {
-    ssize_t n = write(fd, g_boostRest, strlen(g_boostRest));
-    (void)n;
-    close(fd);
+  for (int i = 0; i < kBoostSignalNodes && g_boostPath[i][0]; i++) {
+    int fd = open(g_boostPath[i], O_WRONLY);
+    if (fd >= 0) {
+      ssize_t n = write(fd, g_boostRest[i], strlen(g_boostRest[i]));
+      (void)n;
+      close(fd);
+    }
   }
   signal(sig, SIG_DFL);
   raise(sig);
 }
+
+namespace {
+// The frequencies a devfreq / cpufreq node lists (space separated, Hz or kHz).
+std::vector<long> readFreqs(const std::string& path) {
+  std::ifstream in(path);
+  std::vector<long> v;
+  long f;
+  while (in >> f)
+    if (f > 0) v.push_back(f);
+  return v;
+}
+long readLong(const std::string& path) {
+  std::ifstream in(path);
+  long v = 0;
+  in >> v;
+  return v;
+}
+// The lowest of fs at or above want, else the highest.
+long pickAtLeast(const std::vector<long>& fs, long want) {
+  long pick = 0, hi = 0;
+  for (long f : fs) {
+    if (f > hi) hi = f;
+    if (f >= want && (!pick || f < pick)) pick = f;
+  }
+  return pick ? pick : hi;
+}
+}  // namespace
 
 void WM::setupGpuBoost() {
   const char* env = getenv("JSUI_WL_GPU_BOOST");
@@ -3787,29 +3839,42 @@ void WM::setupGpuBoost() {
   const char* dirEnv = getenv("JSUI_WL_GPU_BOOST_DEVFREQ");  // another devfreq directory (tests)
   const char* dir = dirEnv && *dirEnv ? dirEnv : "/sys/class/kgsl/kgsl-3d0/devfreq";
   std::string path = std::string(dir) + "/min_freq";
-  if (mhz <= 0 || access(path.c_str(), W_OK) != 0) return;
-  // The frequencies the governor knows: the boost is the lowest at or above
-  // the one asked for (else the highest), the rest the lowest of all (not
-  // min_freq as found: a jsui-wl that died boosted left it raised).
-  std::ifstream in(std::string(dir) + "/available_frequencies");
-  long hz, lo = 0, hi = 0, pick = 0;
-  while (in >> hz) {
-    if (hz <= 0) continue;
-    if (!lo || hz < lo) lo = hz;
-    if (hz > hi) hi = hz;
-    if (hz >= mhz * 1000000 && (!pick || hz < pick)) pick = hz;
+  if (mhz > 0 && access(path.c_str(), W_OK) == 0) {
+    // The frequencies the governor knows: the boost is the lowest at or above
+    // the one asked for (else the highest), the rest the lowest of all (not
+    // min_freq as found: a jsui-wl that died boosted left it raised).
+    std::vector<long> fs = readFreqs(std::string(dir) + "/available_frequencies");
+    if (!fs.empty()) boostNodes_.push_back({path, pickAtLeast(fs, mhz * 1000000), *std::min_element(fs.begin(), fs.end())});
   }
-  if (!lo) return;
-  boostPath_ = path;
-  boostHz_ = pick ? pick : hi;
-  boostRestHz_ = lo;
-  gpuBoostWrite(boostRestHz_);
-  if (path.size() < sizeof(g_boostPath)) {
-    snprintf(g_boostPath, sizeof(g_boostPath), "%s", path.c_str());
-    snprintf(g_boostRest, sizeof(g_boostRest), "%ld\n", boostRestHz_);
-    for (int sig : {SIGTERM, SIGINT, SIGHUP})
-      if (signal(sig, gpuBoostSignal) == SIG_IGN) signal(sig, SIG_IGN);  // ignored stays ignored
+  const char* cpuEnv = getenv("JSUI_WL_CPU_BOOST");
+  const long cpuMhz = cpuEnv ? atol(cpuEnv) : 1400;
+  const char* cpuDirEnv = getenv("JSUI_WL_CPU_BOOST_CPUFREQ");  // another cpufreq directory (tests)
+  const std::string cpuDir = cpuDirEnv && *cpuDirEnv ? cpuDirEnv : "/sys/devices/system/cpu/cpufreq";
+  for (int i = 0; cpuMhz > 0 && i < 16; i++) {
+    const std::string pol = cpuDir + "/policy" + std::to_string(i);
+    const std::string minPath = pol + "/scaling_min_freq";
+    if (access(minPath.c_str(), W_OK) != 0) continue;
+    std::vector<long> fs = readFreqs(pol + "/scaling_available_frequencies");  // kHz
+    if (fs.empty()) continue;
+    const long boost = pickAtLeast(fs, cpuMhz * 1000);
+    // The rest is the minimum as found (the vendor may keep the big cores
+    // up), unless a jsui-wl that died boosted left it there.
+    long rest = readLong(minPath);
+    if (rest <= 0 || rest >= boost) rest = readLong(pol + "/cpuinfo_min_freq");
+    if (rest <= 0) rest = *std::min_element(fs.begin(), fs.end());
+    if (rest < boost) boostNodes_.push_back({minPath, boost, rest});
   }
+  if (boostNodes_.empty()) return;
+  gpuBoostWrite(false);
+  for (size_t i = 0; i < boostNodes_.size() && i < size_t(kBoostSignalNodes); i++) {
+    const BoostNode& n = boostNodes_[i];
+    if (n.path.size() >= sizeof(g_boostPath[i])) continue;
+    snprintf(g_boostPath[i], sizeof(g_boostPath[i]), "%s", n.path.c_str());
+    snprintf(g_boostRest[i], sizeof(g_boostRest[i]), "%ld\n", n.restHz);
+  }
+  for (int sig : {SIGTERM, SIGINT, SIGHUP})
+    if (signal(sig, gpuBoostSignal) == SIG_IGN) signal(sig, SIG_IGN);  // ignored stays ignored
+  if (const char* e = getenv("JSUI_WL_BOOST_APP_MS")) boostAppMs_ = atof(e);
   boostTimer_ = wl_event_loop_add_timer(loop_, [](void* u) -> int {
     auto* w = static_cast<WM*>(u);
     const double left = w->boostUntil_ - nowMs();
@@ -3817,43 +3882,61 @@ void WM::setupGpuBoost() {
       wl_event_source_timer_update(w->boostTimer_, int(left) + 1);
     } else if (w->boosted_) {
       w->boosted_ = false;
-      w->gpuBoostWrite(w->boostRestHz_);
+      w->gpuBoostWrite(false);
     }
     return 0;
   }, this);
-  logf("GPU boost: min_freq %ld MHz from a touch while its frames are drawn, else %ld MHz", boostHz_ / 1000000,
-       boostRestHz_ / 1000000);
+  for (const BoostNode& n : boostNodes_) logf("boost: %s %ld while touched / typing / answering, else %ld", n.path.c_str(), n.boostHz, n.restHz);
 }
 
-void WM::gpuBoostWrite(long hz) {
-  // Writes fail when min_freq would exceed max_freq (a thermal cap): then
-  // the governor's own choice stands.
-  FILE* f = fopen(boostPath_.c_str(), "w");
-  if (!f) return;
-  fprintf(f, "%ld\n", hz);
-  fclose(f);
+void WM::gpuBoostWrite(bool on) {
+  // Only on a change (boosted_), never per frame. Writes fail when the
+  // minimum would exceed the maximum (a thermal cap): then the governor's
+  // own choice stands.
+  for (const BoostNode& n : boostNodes_) {
+    FILE* f = fopen(n.path.c_str(), "w");
+    if (!f) continue;
+    fprintf(f, "%ld\n", on ? n.boostHz : n.restHz);
+    fclose(f);
+  }
 }
 
-void WM::gpuBoost(bool touch) {
+void WM::gpuBoost(Boost why) {
   if (!boostTimer_) return;
-  // A touch starts it; frames keep it while they come, up to 2 s after the
-  // last touch (an app redrawing on its own, a clock's second hand or a
-  // video, does not hold the GPU up).
+  // A touch or a key starts it; the shell's frames keep it while they come,
+  // up to 2 s after the last touch (an app redrawing on its own, a clock's
+  // second hand or a video, does not hold the GPU up). Frames the focused
+  // app commits start and keep it within boostAppMs_ of the last touch or
+  // key: typing, and the answer to it.
   constexpr double kHoldMs = 500, kAfterTouchMs = 2000;
   const double now = nowMs();
-  if (touch) boostTouch_ = now;
-  else if (!boosted_ || now - boostTouch_ > kAfterTouchMs) return;
+  switch (why) {
+    case Boost::Touch:
+      boostTouch_ = boostInput_ = now;
+      break;
+    case Boost::Input:
+      boostInput_ = now;
+      break;
+    case Boost::Frame:
+      if (!boosted_ || now - boostTouch_ > kAfterTouchMs) return;
+      break;
+    case Boost::App:
+      if (now - boostInput_ > boostAppMs_) return;
+      // Already held well past now: nothing to do (the common case, per commit).
+      if (boosted_ && boostUntil_ - now > kHoldMs - 50) return;
+      break;
+  }
   boostUntil_ = now + kHoldMs;
   if (!boosted_) {
     boosted_ = true;
-    gpuBoostWrite(boostHz_);
+    gpuBoostWrite(true);
     wl_event_source_timer_update(boostTimer_, int(kHoldMs));
   }
 }
 
 void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
   if (phase == 0 && !backlightRead_) publishSystem();  // the screen is lit now: its level (readStartLevels)
-  gpuBoost(true);
+  gpuBoost(Boost::Touch);
   if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
   if (phase == 0) {
@@ -3912,6 +3995,7 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
 }
 
 void WM::keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t timeMs) {
+  if (down) gpuBoost(Boost::Input);
   uint32_t xkbcode = keycode + 8;
   const xkb_keysym_t* syms = nullptr;
   int n = xkb_state_key_get_syms(kb->xkb_state, xkbcode, &syms);
@@ -3955,6 +4039,7 @@ void WM::keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t tim
 // keyboard, otherwise into the focused client through the virtual keyboard.
 void WM::typeKey(const std::string& key, int mods) {
   if (key.empty()) return;
+  gpuBoost(Boost::Input);
   if (keyboardGrabbed_) {
     jsui_send_key(rt_, key.c_str(), nullptr, 1, 0, mods);
     if (key.size() <= 4 && static_cast<unsigned char>(key[0]) >= 0x20 && key != "Enter") jsui_send_text(rt_, key.c_str());
@@ -4325,7 +4410,7 @@ void WM::scheduleFrame() {
 // The GPU path's frame (see tick): paint, hand to the present thread, and
 // let the apps draw their next frames.
 void WM::presentMir() {
-  gpuBoost(false);
+  gpuBoost(Boost::Frame);
   double t0 = nowMs();
   renderGpu();
   shellDirty_ = false;  // nothing for the headless scene: the Mir window is the screen
@@ -5079,7 +5164,7 @@ int WM::run() {
   scheduleTick(0);
   wl_display_run(display_);
   logf("quit");
-  if (boosted_) gpuBoostWrite(boostRestHz_);
+  if (boosted_) gpuBoostWrite(false);
   wl_display_destroy_clients(display_);
   if (rt_) jsui_destroy(rt_);
   wl_display_destroy(display_);
