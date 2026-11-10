@@ -44,7 +44,9 @@ APPS = {
     "claude": (f"{HOME}/.local/bin/claude-desktop", f"CLAUDE_DESKTOP_FLAGS=--user-data-dir={HOME}/caps/cdtest",
                "[c]aps/cdtest", 20),
     "foot": (f"{HOME}/jsui-wm/foot", "", "[j]sui-wm/foot", 4),
-    "calc": ("CALC", "", "[c]alculator", 6),
+    "calc": ("CLICK:calculator.ubports", "", "[c]alculator", 6),
+    "camera": ("CLICK:camera.ubports", "", "[l]omiri-camera-app", 6),
+    "gallery": ("CLICK:gallery.ubports", "", "[g]allery-app", 6),
 }
 
 
@@ -108,12 +110,18 @@ def jsui_env():
     return env
 
 
-def calc_exec():
+def click_desktop(prefix):
+    """The .desktop file of an installed click app (calculator.ubports, ...)."""
     d = os.path.join(HOME, ".local/share/applications")
     for n in sorted(os.listdir(d)):
-        if n.startswith("calculator.ubports") and n.endswith(".desktop"):
+        if n.startswith(prefix) and n.endswith(".desktop"):
             return os.path.join(d, n)
     return None
+
+
+# Apps that keep a size of their own whatever they are told (Camera ties its
+# width to the viewfinder's aspect): shown fitted by design, not checked.
+KEEPS_OWN_SIZE = ("camera.ubports",)
 
 
 def launch(name, tries=2):
@@ -141,8 +149,8 @@ def stop(name):
 def launch_once(name):
     ex, extra, _, wait = APPS[name]
     before = {w["id"] for w in ctl.windows()["windows"]}
-    if ex == "CALC":
-        desk = calc_exec()
+    if ex.startswith("CLICK:"):
+        desk = click_desktop(ex[6:])
         env = dict(os.environ)
         subprocess.run(["python3", os.path.join(HOME, "ut-launch2.py"), desk, "/dev/null"], env=env,
                        stdout=subprocess.DEVNULL)
@@ -177,6 +185,8 @@ def problems(st, w):
     if not (w["maximized"] or w["snap"] or w["fullscreen"]):
         # Tablet mode: every app window is maximized, split or fullscreen.
         return ["floating (not maximized, split or fullscreen)"]
+    if w["app"].startswith(KEEPS_OWN_SIZE):
+        return []
     out = []
     x, y, ww, hh = w["rect"]
     rx, ry, rw, rh = w["room"]
@@ -445,6 +455,20 @@ def run(apps, rep, only):
             # into swap and its windows behind took seconds to follow.
             stop(name)
             ids.pop(name, None)
+    if want("qt"):
+        # Regression (2026-11-09): Camera | Gallery side by side in landscape,
+        # both small. Gallery must fill its pane 1:1 (its minimum height at the
+        # device's grid unit was taller than the screen); Camera keeps its
+        # viewfinder's aspect (KEEPS_OWN_SIZE).
+        rotate(90)
+        cam, gal = launch("camera"), launch("gallery")
+        if cam and gal:
+            rep.step("camera|gallery: side by side", lambda: ctl(f'wm wm:split {{"left":{cam},"right":{gal}}}'),
+                     both(win(cam, "snap", 1), win(gal, "snap", 2), win(gal, "fit", 1)))
+            rep.step("camera|gallery: turned to 0", lambda: rotate(0), win(gal, "fit", 1))
+            rep.step("camera|gallery: turned back", lambda: rotate(90), win(gal, "fit", 1))
+        stop("camera")
+        stop("gallery")
     if len(apps) < 2 or not want("pairs"):
         return
     for i in range(len(apps)):
