@@ -45,7 +45,7 @@ APPS = {
                "[c]aps/cdtest", 20),
     "foot": (f"{HOME}/jsui-wm/foot", "", "[j]sui-wm/foot", 4),
     "calc": ("CLICK:calculator.ubports", "", "[c]alculator", 6),
-    "camera": ("CLICK:camera.ubports", "", "[l]omiri-camera-app", 6),
+    "camera": ("CLICK:camera.ubports_camera", "", "[l]omiri-camera-app", 6),
     "gallery": ("CLICK:gallery.ubports", "", "[g]allery-app", 6),
 }
 
