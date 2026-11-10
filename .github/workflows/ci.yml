@@ -1507,7 +1507,7 @@ jobs:
   # jsui-render is built; Skia and FetchContent sources are cached.
   reference-macos:
     name: reference (macOS, jsui vs react-native-web)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.reference == 'true'
     continue-on-error: true
@@ -1520,7 +1520,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/skia-prebuilt
-          key: skia-prebuilt-macos-14-${{ hashFiles('cmake/Deps.cmake') }}
+          key: skia-prebuilt-macos-15-${{ hashFiles('cmake/Deps.cmake') }}
       - name: Cache FetchContent sources
         uses: actions/cache@v4
         with:
@@ -1565,7 +1565,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14]
+        os: [macos-15]
     steps:
       - uses: actions/checkout@v4
       - name: Cache prebuilt Skia
