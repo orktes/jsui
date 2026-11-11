@@ -748,6 +748,37 @@ void InputManager::updateHover(PointerState& p, Node* hit) {
 
 void InputManager::leaveAll(PointerState& p) { updateHover(p, nullptr); }
 
+// Like React Native's pressRetentionOffset: a finger that drifts a little
+// off the element it pressed (contact jitter, a rolling fingertip, the
+// element shrinking under a pressedStyle scale) keeps the press. Without
+// it the first pixel outside sent pointerleave, which cancels the press:
+// fast typing on an on-screen keyboard (small keys, gaps between them)
+// lost taps. Touch only; the mouse keeps exact hover / :active semantics.
+Rect InputManager::pressRetentionRect(const Node* n) const {
+  Rect r = visualRect(n);
+  float top = 20, left = 20, right = 20, bottom = 30;
+  const Value& o = n->props()["pressRetentionOffset"];
+  if (o.isNumber()) {
+    top = left = right = bottom = float(o.asNumber());
+  } else if (o.isObject()) {
+    top = float(o["top"].asNumber(top));
+    left = float(o["left"].asNumber(left));
+    right = float(o["right"].asNumber(right));
+    bottom = float(o["bottom"].asNumber(bottom));
+  }
+  return {r.x - left, r.y - top, r.width + left + right, r.height + top + bottom};
+}
+
+bool InputManager::pressRetained(PointerState& p, float x, float y) {
+  if (!p.touch || !(p.buttons & 1) || p.retainLost) return false;
+  Node* n = alive(p.downId);
+  while (n && !(listenMask(n) & kPress)) n = n->parent();
+  if (!n) return false;  // nothing to keep pressed: hover as usual
+  if (pressRetentionRect(n).contains(x, y)) return true;
+  p.retainLost = true;
+  return false;
+}
+
 void InputManager::updateCursor(Node* hit) {
   const char* cursor = "default";
   for (Node* n = hit; n; n = n->parent()) {
@@ -854,6 +885,7 @@ bool InputManager::pointerDown(PointerState& p, uint32_t hitId, int button) {
     p.startY = p.y;
     p.jsOwns = false;
     p.owned = false;
+    p.retainLost = false;
     endGesture(p);
   }
   if (button == 0) {
@@ -1106,7 +1138,7 @@ bool InputManager::touch(int id, int phase, float x, float y) {
       dragTo(p, sv, x, y);
       return true;
     }
-    updateHover(p, alive(hitId));
+    if (!pressRetained(p, x, y)) updateHover(p, alive(hitId));
     absorbAnswers(p);
     uint32_t targetId = alive(p.captureId) ? p.captureId : hitId;
     bool handled = false;

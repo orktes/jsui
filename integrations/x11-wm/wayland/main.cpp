@@ -921,6 +921,12 @@ class WM {
   void snapshotBackdrop(bool on);
   void haptic(int ms);
   double lastHaptic_ = 0;
+  // Typing trace (on while $XDG_RUNTIME_DIR/jsui-wl-keytrace exists, checked
+  // at each shell touch-down): shell touches, the keyboard's own events
+  // (wm:trace) and the keys typed, with times, appended to ~/caps/keytrace.log.
+  FILE* keyTrace_ = nullptr;
+  void checkKeyTrace();
+  void ktrace(const char* fmt, ...);
   // Screen brightness and output volume (the shell's Quick Settings): the
   // backlight through repowerd (Ubuntu Touch: setUserBrightness takes the
   // backlight's own 0..max_brightness), the volume through PulseAudio
@@ -3483,6 +3489,8 @@ void WM::onMessage(const char* name, const char* json) {
     wifiConnect(v["ssid"].str(), v["password"].str());
   } else if (n == "wm:wifiRadio") {
     spawnQuiet({"nmcli", "radio", "wifi", v["on"].truthy() ? "on" : "off"});
+  } else if (n == "wm:trace") {
+    if (keyTrace_) ktrace("js %s", v["s"].str().c_str());
   } else if (n == "wm:haptic") {
     haptic(int(v["ms"].num(12)));
   } else if (n == "wm:brightness") {
@@ -3952,6 +3960,7 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
   gpuBoost(Boost::Touch);
   if (perfEvery_) logf("touch %d at %.0f", phase, nowMs());
   int tid = 1 + (id % 1000);
+  if (phase == 0) checkKeyTrace();
   if (phase == 0) {
     wlr_surface* s = nullptr;
     double sx = 0, sy = 0;
@@ -3959,6 +3968,7 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
     touches_[id] = t;
     touchPos_[id] = {x, y};
     if (t == Target::Shell) {
+      if (keyTrace_) ktrace("touch %d down %.0f %.0f", tid, L(x), L(y));
       jsui_set_event_time(rt_, nowMs());
       jsui_send_touch(rt_, tid, 0, float(L(x)), float(L(y)));
       scheduleTick(0);
@@ -3981,6 +3991,7 @@ void WM::touchEvent(int id, int phase, double x, double y, uint32_t timeMs) {
     // panel it never moves; libinput's up events carry none.)
     Pos& at = touchPos_[id];
     if (phase == 1) at = {x, y};
+    if (keyTrace_) ktrace("touch %d %s %.0f %.0f", tid, phase == 1 ? "move" : phase == 2 ? "up" : "cancel", L(at.x), L(at.y));
     jsui_send_touch(rt_, tid, phase, float(L(at.x)), float(L(at.y)));
     scheduleTick(0);
   } else {
@@ -4050,9 +4061,37 @@ void WM::keyboardKey(wlr_keyboard* kb, uint32_t keycode, bool down, uint32_t tim
 
 // The on-screen keyboard: into the shell's own text field while it has the
 // keyboard, otherwise into the focused client through the virtual keyboard.
+void WM::checkKeyTrace() {
+  const char* dir = getenv("XDG_RUNTIME_DIR");
+  bool on = dir && access((std::string(dir) + "/jsui-wl-keytrace").c_str(), F_OK) == 0;
+  if (on == (keyTrace_ != nullptr)) return;
+  if (on) {
+    const char* home = getenv("HOME");
+    keyTrace_ = std::fopen((std::string(home ? home : "/tmp") + "/caps/keytrace.log").c_str(), "a");
+    if (keyTrace_) ktrace("trace on");
+  } else {
+    ktrace("trace off");
+    std::fclose(keyTrace_);
+    keyTrace_ = nullptr;
+  }
+  jsui_set_state(rt_, "wm.keyTrace", keyTrace_ ? "true" : "false");
+}
+
+void WM::ktrace(const char* fmt, ...) {
+  if (!keyTrace_) return;
+  std::fprintf(keyTrace_, "%.1f ", nowMs());
+  va_list ap;
+  va_start(ap, fmt);
+  std::vfprintf(keyTrace_, fmt, ap);
+  va_end(ap);
+  std::fputc('\n', keyTrace_);
+  std::fflush(keyTrace_);
+}
+
 void WM::typeKey(const std::string& key, int mods) {
   if (key.empty()) return;
   gpuBoost(Boost::Input);
+  if (keyTrace_) ktrace("type %s mods %d to %s", key.c_str(), mods, keyboardGrabbed_ ? "shell" : "app");
   if (keyboardGrabbed_) {
     jsui_send_key(rt_, key.c_str(), nullptr, 1, 0, mods);
     if (key.size() <= 4 && static_cast<unsigned char>(key[0]) >= 0x20 && key != "Enter") jsui_send_text(rt_, key.c_str());
@@ -4061,7 +4100,10 @@ void WM::typeKey(const std::string& key, int mods) {
     return;
   }
   xkb_keysym_t sym = keysymFor(key);
-  if (sym == XKB_KEY_NoSymbol) return;
+  if (sym == XKB_KEY_NoSymbol) {
+    if (keyTrace_) ktrace("  dropped: no keysym");
+    return;
+  }
   // Find a keycode (and whether it needs Shift) for the keysym.
   struct Find {
     xkb_keymap* km;
@@ -4091,10 +4133,14 @@ void WM::typeKey(const std::string& key, int mods) {
     // input (text_input_v3.h) takes it as text. Keys go first: Firefox
     // ignored commit_string for plain ASCII.
     if (mods == 0 && textInputV3_.active()) textInputV3_.commit(key);
+    else if (keyTrace_) ktrace("  dropped: no key types it");
     return;
   }
   Client* c = find(active_);
-  if (!c) return;
+  if (!c) {
+    if (keyTrace_) ktrace("  dropped: no active window");
+    return;
+  }
   uint32_t timeMs = uint32_t(nowMs());
   wlr_seat_set_keyboard(seat_, &vkbd_);
   wlr_seat_keyboard_notify_enter(seat_, c->xdg->surface, nullptr, 0, &vkbd_.modifiers);

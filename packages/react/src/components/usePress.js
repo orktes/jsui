@@ -403,7 +403,6 @@ export const PRESS_PROPS = [
   'delayHoverIn',
   'delayHoverOut',
   'unstable_pressDelay',
-  'pressRetentionOffset',
   'android_ripple',
   'android_disableSound',
   'cancelable',

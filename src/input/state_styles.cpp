@@ -36,7 +36,8 @@ bool InputManager::stateHovered(const Node* n) const {
   return std::find(mouse_.chain.begin(), mouse_.chain.end(), n->id()) != mouse_.chain.end();
 }
 
-// Like CSS :active, held only while the pointer stays over the element: a
+// Like CSS :active, held only while the pointer stays over the element (a
+// touch: inside the press retention rect, InputManager::pressRetained): a
 // primary press (mouse or touch, not one that turned into scrolling) began
 // on it or a descendant; or the activation key / gamepad A holds it; or a
 // press began on it since the last frame.
@@ -45,7 +46,10 @@ bool InputManager::statePressed(const Node* n) const {
   auto pointer = [&](const PointerState& p) {
     if (!(p.buttons & 1) || !p.downId || p.scrollingId) return false;
     Node* d = alive(p.downId);
-    return d && within(d, n) && visualRect(n).contains(p.x, p.y);
+    if (!d || !within(d, n)) return false;
+    // A touch keeps it inside its press retention rect (pressRetained).
+    if (p.touch) return !p.retainLost && pressRetentionRect(n).contains(p.x, p.y);
+    return visualRect(n).contains(p.x, p.y);
   };
   if (pointer(mouse_)) return true;
   for (const PointerState& t : touches_)

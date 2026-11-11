@@ -599,6 +599,54 @@ TEST(input_touch) {
                            ev("scrollenddrag", sv) + " " + ev("pointerleave", btn));
 }
 
+// A finger that drifts a little off the pressable it went down on (jitter,
+// a pressedStyle scale shrinking the element under it) keeps the press,
+// like React Native's pressRetentionOffset; past it the press goes.
+TEST(input_touch_press_retention) {
+  Fixture f;
+  Node* root = f.doc().root();
+  Node* key = f.box(root, 100, 100, 60, 40, R"({"__events":["press","hoverIn"],"pressedStyle":{"opacity":0.5}})");
+  Node* tight = f.box(root, 300, 100, 60, 40, R"({"__events":["press","hoverIn"],"pressRetentionOffset":0})");
+  f.layout();
+  auto has = [](const std::string& s, const std::string& what) { return s.find(what) != std::string::npos; };
+  // Out by 15 px left and 25 px below: inside 20 / 30. Up there: the
+  // pointerup is still the key's, and nothing left it before.
+  f.in().touch(0, 0, 110, 110);
+  f.rt->tick(16);
+  CHECK(f.in().statePressed(key));
+  f.in().touch(0, 1, 85, 165);
+  CHECK(f.in().statePressed(key));
+  std::string e = f.events();
+  CHECK(!has(e, ev("pointerleave", key)));
+  f.in().touch(0, 2, 85, 165);
+  e = f.events();
+  CHECK(has(e, ev("pointerup", key)));
+  CHECK(e.find(ev("pointerleave", key)) > e.find(ev("pointerup", key)));
+  // Past it: pointerleave (Pressable cancels), and back inside the press
+  // stays lost.
+  f.in().touch(1, 0, 110, 110);
+  f.rt->tick(32);
+  f.in().touch(1, 1, 110, 175);
+  CHECK(!f.in().statePressed(key));
+  CHECK(has(f.events(), ev("pointerleave", key)));
+  f.in().touch(1, 1, 110, 135);
+  CHECK(!f.in().statePressed(key));
+  f.in().touch(1, 2, 110, 135);
+  f.events();
+  // pressRetentionOffset: 0 is exact.
+  f.in().touch(2, 0, 310, 110);
+  f.in().touch(2, 1, 299, 110);
+  CHECK(has(f.events(), ev("pointerleave", tight)));
+  f.in().touch(2, 2, 299, 110);
+  // The mouse keeps exact hover.
+  f.in().mouseButton(110, 110, 0, true, 0);
+  f.rt->tick(48);
+  f.in().mouseMove(95, 110);
+  CHECK(has(f.events(), ev("pointerleave", key)));
+  CHECK(!f.in().statePressed(key));
+  f.in().mouseButton(95, 110, 0, false, 0);
+}
+
 // ------------------------------------------------------------------ focus
 
 TEST(input_tab_order_and_activation) {
