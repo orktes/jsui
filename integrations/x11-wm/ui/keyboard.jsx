@@ -64,7 +64,7 @@ const where = (e) => {
   return n ? ` #${n.pointerId} ${Math.round(n.x)},${Math.round(n.y)}` : '';
 };
 
-const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
+const Key = memo(function Key({ k, label, icon, flex, alt, on, last, onPress }) {
   const t = useTheme();
   const anchor = useAnchor(`osk.${k}`);
   const pressRef = useRef(onPress);
@@ -117,7 +117,7 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
       // The key takes touches up to the middle of the gaps around it (its
       // padding): a tap between two rows or keys used to hit only the board.
       group
-      style={[styles.key, { flex }]}
+      style={[styles.key, { flex }, last && styles.keyLast]}
     >
       <View
         style={[styles.keyFace, { backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
@@ -174,7 +174,7 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
       style={[styles.board, { backgroundColor: t.panel, borderColor: t.panelLine, boxShadow: `0px -10px 40px ${t.shadow}` }]}
     >
       {rows.map((row, r) => (
-        <View key={r} style={styles.row}>
+        <View key={r} style={[styles.row, r === rows.length - 1 && styles.rowLast]}>
           {row.map((k) => {
             const label = LABELS[k] != null ? LABELS[k] : k.length === 1 && shift ? k.toUpperCase() : k;
             return (
@@ -184,6 +184,7 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
                 label={label}
                 icon={ICONS[k]}
                 flex={WIDE[k] || 1}
+                last={r === rows.length - 1}
                 alt={k.length > 1 && k !== ' ' && !/^[^a-z]{2}$/.test(k)}
                 on={(k === 'Shift' && shift) || (k === 'Ctrl' && ctrl)}
                 onPress={() => press(k)}
@@ -198,9 +199,13 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
 
 const styles = StyleSheet.create({
   // Keys are 52 px tall with 8 px gaps; each key's padding is half a gap.
-  board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 6, paddingBottom: 16, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+  // The bottom row's keys reach down to the screen edge (thumbs hit the
+  // space bar low: taps in the board's bottom padding typed nothing).
+  board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 6, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
   row: { flexDirection: 'row', height: 60 },
+  rowLast: { height: 76 },
   key: { paddingHorizontal: 4, paddingVertical: 4 },
+  keyLast: { paddingBottom: 20 },
   keyFace: { flex: 1, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center' },
   keyText: { fontFamily: font, fontWeight: '500' },
 });
