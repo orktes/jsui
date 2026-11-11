@@ -2939,17 +2939,30 @@ Rect WM::snapSlot(int side) const {
         return int(std::lround((tall ? c->tl->current.min_height : c->tl->current.min_width) * c->cs));
     return 0;
   };
+  // The seam between lo (side 1 at its minimum) and hi (side 2 at its). When
+  // both minimums don't fit (Claude Desktop 1050 px and a Firefox that holds
+  // 1579 px on a 2000 px screen), the side with the smaller one gets exactly
+  // it, drawn 1:1, and the other the rest (shown fitted); at the ratio both
+  // were scaled down. Nothing moves if even that one doesn't fit.
+  auto place = [](int seam, int lo, int hi, int m1, int m2, int first, int last) {
+    if (lo <= hi) return std::clamp(seam, lo, hi);
+    if (m1 <= m2 && lo <= last) return lo;
+    if (m2 < m1 && hi >= first) return hi;
+    return seam;
+  };
   if (sh_ > sw_) {
     int tb = P(titleBar_);
     int y0 = wa.y - tb, y1 = wa.y + wa.h;
     int seam = y0 + int(std::lround((y1 - y0) * splitRatio_));
-    const int lo = wa.y + P(5) + least(1, true), hi = y1 - P(5) - tb - least(2, true);
-    if (lo <= hi) seam = std::clamp(seam, lo, hi);
+    const int m1 = least(1, true), m2 = least(2, true);
+    const int lo = wa.y + P(5) + m1, hi = y1 - P(5) - tb - m2;
+    seam = place(seam, lo, hi, m1, m2, wa.y + P(5), y1 - P(5) - tb);
     return side == 1 ? Rect{wa.x, wa.y, wa.w, seam - P(5) - wa.y} : Rect{wa.x, seam + P(5) + tb, wa.w, y1 - seam - P(5) - tb};
   }
   int seam = int(std::lround(wa.w * splitRatio_));
-  const int lo = P(5) + least(1, false), hi = wa.w - P(5) - least(2, false);
-  if (lo <= hi) seam = std::clamp(seam, lo, hi);
+  const int m1 = least(1, false), m2 = least(2, false);
+  const int lo = P(5) + m1, hi = wa.w - P(5) - m2;
+  seam = place(seam, lo, hi, m1, m2, P(5), wa.w - P(5));
   int left = seam - P(5);
   int right0 = seam + P(5);
   return side == 1 ? Rect{wa.x, wa.y, left, wa.h} : Rect{wa.x + right0, wa.y, wa.w - right0, wa.h};
