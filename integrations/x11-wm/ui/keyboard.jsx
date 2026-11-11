@@ -99,23 +99,36 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
       }}
       onHoverOut={(e) => trace(`leave ${k}${where(e)}`)}
       // Cancelled (the finger slid well off) before anything committed it:
-      // it types nothing. (After a release onPress has already committed;
-      // a quick second tap flushes the first press's delayed onPressOut
+      // it types nothing. Checked after the dispatch: a release held past
+      // minPressDuration sends onPressOut right before its onPress (and the
+      // press's start can be stamped with an old frame time after a pause),
+      // so cancelling here at once dropped most taps that followed a pause.
+      // (A quick second tap flushes the first press's delayed onPressOut
       // after its own onPointerDown, hence `armed`, not `mine`.)
       onPressOut={() => {
-        if (pending && pending === armed.current) {
-          trace(`cancel ${k}`);
-          pending = null;
-        }
+        const was = armed.current;
+        Promise.resolve().then(() => {
+          if (pending && pending === was) {
+            trace(`cancel ${k}`);
+            pending = null;
+          }
+        });
       }}
-      style={[styles.key, { flex, backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
-      pressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
+      // The key takes touches up to the middle of the gaps around it (its
+      // padding): a tap between two rows or keys used to hit only the board.
+      group
+      style={[styles.key, { flex }]}
     >
-      {icon ? (
-        <Icon name={icon} size={24} color={on ? t.accentText : t.text} />
-      ) : (
-        <Text style={[styles.keyText, { color: on ? t.accentText : t.text, fontSize: label.length > 2 ? 16 : 22 }]}>{label}</Text>
-      )}
+      <View
+        style={[styles.keyFace, { backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
+        groupPressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
+      >
+        {icon ? (
+          <Icon name={icon} size={24} color={on ? t.accentText : t.text} />
+        ) : (
+          <Text style={[styles.keyText, { color: on ? t.accentText : t.text, fontSize: label.length > 2 ? 16 : 22 }]}>{label}</Text>
+        )}
+      </View>
     </Pressable>
   );
 });
@@ -184,8 +197,10 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
 });
 
 const styles = StyleSheet.create({
-  board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 10, paddingBottom: 12, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
-  row: { flexDirection: 'row', height: 52, marginBottom: 8 },
-  key: { marginHorizontal: 4, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center' },
+  // Keys are 52 px tall with 8 px gaps; each key's padding is half a gap.
+  board: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 6, paddingBottom: 16, borderTopWidth: 1, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+  row: { flexDirection: 'row', height: 60 },
+  key: { paddingHorizontal: 4, paddingVertical: 4 },
+  keyFace: { flex: 1, borderRadius: radius.s, alignItems: 'center', justifyContent: 'center' },
   keyText: { fontFamily: font, fontWeight: '500' },
 });
