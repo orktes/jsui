@@ -148,6 +148,9 @@ class InputManager {
   bool toLocal(const Node* n, float x, float y, float* lx, float* ly) const;
   // Viewport-space bounding box of a node including transforms.
   Rect visualRect(const Node* n) const;
+  // A touch press's retention rect: the pressed element's visual rect grown
+  // by its pressRetentionOffset (React Native's default: 20, 30 below).
+  Rect pressRetentionRect(const Node* n) const;
   // focusable === true, pressable (unless focusable === false), TextInput;
   // not disabled. Does not check visibility.
   bool isFocusable(const Node* n) const;
@@ -255,6 +258,7 @@ class InputManager {
     bool jsOwns = false;      // a JS responder kept this gesture: no native scrolling
     bool jsResponder = false; // a JS responder held it at the last dispatch
     bool owned = false;       // the UI consumed the press: its moves / release are consumed too
+    bool retainLost = false;  // a touch press went past its retention rect (pressRetained)
     std::vector<uint32_t> chain;  // hovered path, root first
     // JS answers still to come for this gesture (Inbound::take): the
     // pointerdown / pointermove dispatches whose flags set jsOwns /
@@ -355,6 +359,10 @@ class InputManager {
   int askPointer(const char* type, Node* target, PointerState& p, int button, float x, float y, bool track,
                  bool down = false);
   void updateHover(PointerState& p, Node* hit);
+  // Whether a held touch at (x, y) still keeps its press: true while it has
+  // stayed inside the retention rect of the pressable it went down on (then
+  // its hover path is left alone, so the press is not cancelled).
+  bool pressRetained(PointerState& p, float x, float y);
   void leaveAll(PointerState& p);
   void updateCursor(Node* hit);
   bool consumes(const Node* hit, unsigned mask) const;

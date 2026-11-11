@@ -1173,9 +1173,11 @@ function Shell() {
           <Guard name="keyboard"><Keyboard screen={scr} onMeasure={measureOsk} onHide={hideOskStable} haptics={settings.keyHaptics !== false} /></Guard>
           {/* Its top edge (and a strip above it) takes a drag down: the
               keyboard follows the finger natively, and on release goes
-              (far or fast enough) or springs back. */}
+              (far or fast enough) or springs back. It stops at the top row
+              of keys (the board's 10 px top padding): reaching into the
+              keys, it took taps on their top edge. */}
           <Animated.View {...kbPan.panHandlers} {...kbDrag.handlers}
-            style={{ position: 'absolute', left: 0, right: 0, top: OSK_OFF - kbH - KB_GRAB, height: KB_GRAB + 14, alignItems: 'center' }}>
+            style={{ position: 'absolute', left: 0, right: 0, top: OSK_OFF - kbH - KB_GRAB, height: KB_GRAB + 10, alignItems: 'center' }}>
             <View pointerEvents="none" style={{ marginTop: KB_GRAB + 4, width: 40, height: 5, borderRadius: 3, backgroundColor: t.textMute, opacity: 0.6 }} />
           </Animated.View>
         </Animated.View>

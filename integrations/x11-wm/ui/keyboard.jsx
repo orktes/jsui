@@ -3,7 +3,7 @@
 // into the focused X client (XTest). Shift and Ctrl are one-shot. The letter
 // layer is a tablet's (letters, shift, return, space); the ?123 layer has the
 // numbers, symbols and the keys a terminal needs (esc, tab, ctrl, arrows).
-import React, { memo, useState } from 'react';
+import React, { memo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
@@ -44,18 +44,54 @@ const refocus = () => {
   if (typingInto && TextInput.State.currentlyFocusedInput() !== typingInto) TextInput.State.focusTextInput(typingInto);
 };
 
+// Rollover, as a phone's keyboard types: a key commits when its finger
+// lifts, or as soon as the next finger lands. Fast two-thumb typing overlaps
+// touches: without it a second tap on a key still held by the first finger
+// was lost (one press per Pressable), and overlapping keys typed in the
+// order their fingers lifted.
+let pending = null; // the press of the key whose finger is still down
+const commit = () => {
+  const p = pending;
+  pending = null;
+  if (p) p();
+};
+
 const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
   const t = useTheme();
   const anchor = useAnchor(`osk.${k}`);
+  const pressRef = useRef(onPress);
+  pressRef.current = onPress;
+  const mine = useRef(null); // this key's latest finger's press
+  const armed = useRef(null); // the one the Pressable's own press began with
   return (
     <Pressable
       ref={anchor.ref}
       onLayout={anchor.onLayout}
       focusable={false}
-      onPressIn={keyDown}
+      // Every finger that lands (the Pressable reports a second finger on a
+      // key it already holds only here).
+      onPointerDown={() => {
+        keyDown();
+        commit();
+        const fire = () => {
+          refocus();
+          pressRef.current();
+        };
+        pending = fire;
+        mine.current = fire;
+      }}
+      onPressIn={() => {
+        armed.current = mine.current;
+      }}
       onPress={() => {
-        refocus();
-        onPress();
+        if (pending && pending === mine.current) commit();
+      }}
+      // Cancelled (the finger slid well off) before anything committed it:
+      // it types nothing. (After a release onPress has already committed;
+      // a quick second tap flushes the first press's delayed onPressOut
+      // after its own onPointerDown, hence `armed`, not `mine`.)
+      onPressOut={() => {
+        if (pending && pending === armed.current) pending = null;
       }}
       style={[styles.key, { flex, backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
       pressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
@@ -73,10 +109,16 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
   keyHaptics = haptics;
   const t = useTheme();
   const [layer, setLayer] = useState('abc');
-  const [shift, setShift] = useState(false);
-  const [ctrl, setCtrl] = useState(false);
+  const [shift, setShiftState] = useState(false);
+  const [ctrl, setCtrlState] = useState(false);
+  // Read through refs: a rollover can commit the next key before the
+  // render that a Shift / Ctrl tap asked for.
+  const mods = useRef({ shift: false, ctrl: false }).current;
+  const setShift = (v) => setShiftState((mods.shift = v));
+  const setCtrl = (v) => setCtrlState((mods.ctrl = v));
   const rows = layer === 'abc' ? LETTERS : SYMBOLS;
   const press = (k) => {
+    const { shift, ctrl } = mods;
     if (k === 'Shift') return setShift(!shift);
     if (k === 'Ctrl') return setCtrl(!ctrl);
     if (k === '?123') return setLayer('sym');
@@ -85,13 +127,13 @@ export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, hapt
       if (onHide) onHide();
       return setSetting('osk', false);
     }
-    const mods = (ctrl ? 2 : 0);
+    const modBits = ctrl ? 2 : 0;
     if (k.length > 1 && !ICONS[k] && !LABELS[k] && k !== 'Escape' && k !== 'Tab') {
       // Multi-character helpers on the symbol layer ("&&", "~/"): type each.
       for (const ch of k) wm.typeKey(ch, 0);
     } else {
       const key = k.length === 1 && shift ? k.toUpperCase() : k;
-      wm.typeKey(key, mods);
+      wm.typeKey(key, modBits);
     }
     if (shift) setShift(false);
     if (ctrl) setCtrl(false);
