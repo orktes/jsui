@@ -4,11 +4,11 @@
 // layer is a tablet's (letters, shift, return, space); the ?123 layer has the
 // numbers, symbols and the keys a terminal needs (esc, tab, ctrl, arrows).
 import React, { memo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View, useHostState } from 'react-native';
 import { useAnchor } from './anchors.js';
 import { Icon } from './icons.jsx';
 import { font, radius, useTheme } from './theme.js';
-import { setSetting, wm } from './wm.js';
+import { send, setSetting, wm } from './wm.js';
 
 const LETTERS = [
   ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'Backspace'],
@@ -55,6 +55,14 @@ const commit = () => {
   pending = null;
   if (p) p();
 };
+// Typing trace (jsui-wl's wm.keyTrace, see its checkKeyTrace): the keys'
+// press events go to ~/caps/keytrace.log next to the host's touches.
+let keyTrace = false;
+const trace = (s) => keyTrace && send('wm:trace', { s });
+const where = (e) => {
+  const n = e && (e.nativeEvent || e);
+  return n ? ` #${n.pointerId} ${Math.round(n.x)},${Math.round(n.y)}` : '';
+};
 
 const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
   const t = useTheme();
@@ -70,10 +78,12 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
       focusable={false}
       // Every finger that lands (the Pressable reports a second finger on a
       // key it already holds only here).
-      onPointerDown={() => {
+      onPointerDown={(e) => {
+        trace(`down ${k}${where(e)}${pending ? ' (rolls over the held key)' : ''}`);
         keyDown();
         commit();
         const fire = () => {
+          trace(`commit ${k}`);
           refocus();
           pressRef.current();
         };
@@ -83,15 +93,20 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
       onPressIn={() => {
         armed.current = mine.current;
       }}
-      onPress={() => {
+      onPress={(e) => {
+        trace(`press ${k}${where(e)}${pending && pending === mine.current ? '' : ' (already committed)'}`);
         if (pending && pending === mine.current) commit();
       }}
+      onHoverOut={(e) => trace(`leave ${k}${where(e)}`)}
       // Cancelled (the finger slid well off) before anything committed it:
       // it types nothing. (After a release onPress has already committed;
       // a quick second tap flushes the first press's delayed onPressOut
       // after its own onPointerDown, hence `armed`, not `mine`.)
       onPressOut={() => {
-        if (pending && pending === armed.current) pending = null;
+        if (pending && pending === armed.current) {
+          trace(`cancel ${k}`);
+          pending = null;
+        }
       }}
       style={[styles.key, { flex, backgroundColor: on ? t.accent : alt ? t.keyAlt : t.key }]}
       pressedStyle={{ backgroundColor: t.accent, transform: [{ scale: 0.94 }] }}
@@ -107,6 +122,7 @@ const Key = memo(function Key({ k, label, icon, flex, alt, on, onPress }) {
 
 export const Keyboard = memo(function Keyboard({ screen, onMeasure, onHide, haptics = true }) {
   keyHaptics = haptics;
+  keyTrace = useHostState('wm.keyTrace', false) === true;
   const t = useTheme();
   const [layer, setLayer] = useState('abc');
   const [shift, setShiftState] = useState(false);
